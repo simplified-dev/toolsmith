@@ -108,6 +108,7 @@ toolsmith serve                 # run the stdio MCP server (what the plugin laun
 .claude-plugin/   plugin.json + marketplace.json (plugin + single-plugin marketplace)
 .mcp.json         registers the `toolsmith serve` MCP server
 skills/           the bundled Java skills
+hooks/            PreToolUse advisory - nudges shell symbol/declaration greps toward the Grep tool / symbol-search (non-blocking; silent on import-greps and non-Java)
 src/toolsmith/
   cli.py          the `toolsmith` command (subcommands + serve)
   server.py       FastMCP server (thin veneer over the modules below)
