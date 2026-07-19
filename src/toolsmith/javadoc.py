@@ -76,7 +76,7 @@ SAFE_FIXES: list[tuple[str, re.Pattern[str], str]] = [
 # without editing this file.
 
 DEFAULT_PREFIXES: list[str] = [
-    'java', 'javax', 'com', 'org', 'net', 'dev', 'io', 'lib',
+    'java', 'javax', 'jakarta', 'com', 'org', 'net', 'dev', 'io', 'lib', 'api',
 ]
 
 

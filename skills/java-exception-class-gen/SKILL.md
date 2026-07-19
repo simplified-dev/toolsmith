@@ -140,7 +140,7 @@ import org.jetbrains.annotations.Nullable;
 /**
  * Thrown when [condition].
  */
-public class FooBarException extends FooException {
+public final class FooBarException extends FooException {
 
     /**
      * Constructs a new {@code FooBarException} with the given cause.

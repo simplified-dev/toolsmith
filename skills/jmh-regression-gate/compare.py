@@ -306,6 +306,11 @@ def main(argv: list[str]) -> int:
                     del store[key]
 
     paired, only_baseline, only_candidate = compare(baseline, candidate)
+    if not paired:
+        print("no benchmarks paired across baseline and candidate - nothing to compare",
+              file=sys.stderr)
+        return 2
+
     if args.format == "md":
         print(render_markdown(paired, args.threshold, args.top, _infer_direction(paired)))
     elif args.format == "json":

@@ -65,7 +65,7 @@ discovery path.
 
 1. **Discovery** - find all records in scope:
    ```
-   mcp__IntelliJ_IDE__search_regex q="^public\s+record\s+\w+" paths=["**/*.java"]
+   mcp__IntelliJ_IDE__search_regex q="record\s+\w+\s*\(" paths=["**/*.java"]
    ```
    Or with the IDE engine: `search_symbol` filtered to record decls.
 

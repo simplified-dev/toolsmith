@@ -19,10 +19,9 @@ the audit aligns with the project's configured profile.
 - Before a library release where API surface should be intentional - public
   classes that should be `final` and `public` fields that should be
   `private` matter at version-boundary commitments.
-- After `java-exception-class-gen` writes new exception classes - per
-  several historical plans (`scan-the-codebase-for-composed-tarjan.md`
-  line 19), project exception classes are expected to be `final`. The skill
-  is the right post-write check.
+- After `java-exception-class-gen` writes new exception classes - project
+  exception classes are `final` leaf classes by convention. The skill is the
+  right post-write check.
 
 Skip when: the file is part of a public-API surface that intentionally
 allows subclassing or external mutation. Convention overrides the audit.
