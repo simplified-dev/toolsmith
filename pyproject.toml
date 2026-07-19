@@ -1,0 +1,35 @@
+[project]
+name = "toolsmith"
+version = "0.1.0"
+description = "Project-scoped MCP server exposing the Simplified Java workspace's deterministic dev tools: gradle verify, JUnit tally, IntelliJ-faithful import reorder, and javadoc normalize."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.md" }
+authors = [{ name = "Simplified" }]
+keywords = ["mcp", "java", "gradle", "junit", "imports", "javadoc", "developer-tools"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = ["fastmcp>=1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+toolsmith = "toolsmith.server:main"
+
+[project.urls]
+Homepage = "https://github.com/simplified-dev/toolsmith"
+Repository = "https://github.com/simplified-dev/toolsmith"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toolsmith"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
