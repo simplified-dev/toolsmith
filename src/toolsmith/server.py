@@ -1,0 +1,108 @@
+"""FastMCP stdio server exposing the toolsmith tools.
+
+This is a thin typed veneer: every tool forwards to the sibling library module
+that does the real work. The point is to make the deterministic, high-frequency
+operations a single cheap typed call instead of a re-derived shell incantation,
+loaded ONLY under the Java workspace via a project-scoped .mcp.json.
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+
+from fastmcp import FastMCP
+
+from . import gradle as _gradle
+from . import imports as _imports
+from . import javadoc as _javadoc
+from . import tally as _tally
+
+mcp = FastMCP("toolsmith")
+
+
+@mcp.tool()
+def gradle_verify(
+    module: str,
+    tasks: list[str] | None = None,
+    tail: int = 25,
+    compile_only: bool = False,
+) -> dict:
+    """Run the module-scoped gradle gate and return a structured pass/fail result.
+
+    Replaces the hand-written shape
+    ``cd MODULE && ./gradlew compileJava test -q 2>&1 | grep -vE noise | tail -N``.
+
+    Args:
+        module: module alias (e.g. "ar"), name ("asset-renderer"), or path.
+        tasks: gradle tasks to run. Defaults to compileJava+test.
+        tail: how many signal / de-noised trailing lines to return.
+        compile_only: use compileJava+compileTestJava as the default task set.
+    """
+    return _gradle.gradle_verify(module, tasks=tasks, tail=tail, compile_only=compile_only)
+
+
+@mcp.tool()
+def test_tally(module: str, subdir: str = "", fails: int = 15) -> dict:
+    """Parse a module's JUnit XML and return counts plus the names of failing tests.
+
+    Replaces the recurring grep/awk/python one-liners over
+    build/test-results/test/*.xml.
+
+    Args:
+        module: module alias, name, or path whose test-results to tally.
+        subdir: optional sub-path holding a nested build dir.
+        fails: cap on the number of failing testcase names returned.
+    """
+    return _tally.tally(module, subdir=subdir, fails_cap=fails)
+
+
+@mcp.tool()
+def reorder_imports(paths: list[str], check: bool = False) -> dict:
+    """Reorder Java imports to the IntelliJ Default layout (IDE-independent).
+
+    Faithful to Optimize Imports: group 1 other, group 2 javax.* then java.*,
+    group 3 static; ASCII sort; wildcards and CRLF/LF preserved; idempotent.
+
+    Args:
+        paths: .java files, directories, or globs.
+        check: report what WOULD change without writing (a gate; sets no files).
+    """
+    return _imports.run(paths, mode="check" if check else "write")
+
+
+@mcp.tool()
+def javadoc_normalize(
+    paths: list[str],
+    fix: bool = False,
+    scope: str = "all",
+    prefix: list[str] | None = None,
+) -> dict:
+    """Audit (or --fix) Java javadocs against the project conventions.
+
+    Args:
+        paths: .java files, directories, or globs to process.
+        fix: apply safe auto-fixes in place (otherwise audit-only).
+        scope: one of class | method | field | all.
+        prefix: extra FQN top-level prefixes to auto-import (additive).
+
+    When fix is True, treat as destructive - re-Read any file you had already
+    Read before editing it further.
+    """
+    argv: list[str] = ["--fix"] if fix else []
+    argv += ["--scope", scope]
+    for p in prefix or []:
+        argv += ["--prefix", p]
+    argv += list(paths)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        code = _javadoc.main(argv)
+    return {"fixed": fix, "exit_code": code, "output": buf.getvalue()[-8000:]}
+
+
+def main() -> None:
+    """Entry point: run the stdio MCP server."""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
