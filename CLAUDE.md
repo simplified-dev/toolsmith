@@ -1,30 +1,36 @@
 # toolsmith
 
-Project-scoped MCP server exposing the Simplified Java workspace's deterministic dev tools (gradle verify, JUnit tally, IntelliJ-faithful import reorder, javadoc normalize). Python / FastMCP.
+General-purpose Java workspace dev toolkit for AI agents, packaged as a Claude Code plugin. Discovers modules in any Java workspace and exposes deterministic tools (gradle verify, JUnit tally, IntelliJ-faithful import reorder, javadoc normalize, module lookup) as an MCP server + a `toolsmith` CLI, plus bundled Java refactor/move/audit skills. Python / FastMCP. Nothing hardcoded to a checkout - `toolsmith setup` discovers and caches the module map.
 
 ## Module Structure
-- `toolsmith.server` - FastMCP stdio server; registers the four tools, forwards each to a library module
-- `toolsmith.gradle` - `gradle_verify` (module-scoped gradle gate, reliable exit code, noise/signal filter)
-- `toolsmith.tally` - `test_tally` (parse `build/test-results/test/*.xml`)
-- `toolsmith.imports` - `reorder_imports` (IntelliJ Default layout reorderer)
-- `toolsmith.javadoc` - bundled javadoc auditor/normalizer (the former `normalize.py`)
-- `toolsmith.modules` - workspace root, module aliases, directory resolution (shared)
+- `toolsmith.cli` - the `toolsmith` command: subcommands (setup, serve, modules, verify, tally, reorder, javadoc, locate)
+- `toolsmith.server` - FastMCP stdio server; tools forward to the modules below
+- `toolsmith.discovery` - scan a root for gradle modules, assign shorthands, write/read the cache, resolve the active root
+- `toolsmith.modules` - cache-backed resolve_module / package_root / find_gradle_root / get_modules
+- `toolsmith.gradle` - gradle_verify (reliable exit code, noise/signal filter)
+- `toolsmith.tally` - test_tally (JUnit XML)
+- `toolsmith.imports` - reorder_imports (IntelliJ Default layout)
+- `toolsmith.javadoc` - the bundled javadoc auditor/normalizer
 
-## Key Entry Points
-- `toolsmith.server:main` - the packaged `toolsmith` executable (stdio MCP server)
-- `python -m toolsmith` - same server without the console script
-- `python -m toolsmith.imports [--check|--diff] PATH...` - reorderer CLI
-- `python -m toolsmith.tally MODULE [--fails N]` - tally CLI
+## Entry Points
+- `toolsmith <subcommand>` (console script) / `python -m toolsmith <subcommand>`
+- Plugin MCP: `.mcp.json` launches `toolsmith serve`
+- Bundled skills under `skills/` (auto-discovered when the plugin is enabled)
 
-## Tools (MCP)
-- `gradle_verify(module, tasks?, tail=25, compile_only=False)` -> `{exit_code, ok, first_failure, lines}`
-- `test_tally(module, subdir="", fails=15)` -> `{tests, passed, skipped, failures, errors, ok, failing_tests[]}`
-- `reorder_imports(paths[], check=False)` -> `{scanned, changed, would_change, skipped, errors, details[]}`
-- `javadoc_normalize(paths[], fix=False, scope="all", prefix?[])` -> `{fixed, exit_code, output}`
+## MCP tools
+- `list_modules()` -> discovered inventory (name, path, package, shorthand, buildable)
+- `gradle_verify(module, tasks?, tail=25, compile_only=False)`
+- `test_tally(module, subdir="", fails=15)`
+- `reorder_imports(paths[], check=False)`
+- `javadoc_normalize(paths[], fix=False, scope="all", prefix?[])`
 
-## Import Order (what reorder_imports reproduces)
-IntelliJ **Default** scheme (this codebase has no custom `IMPORT_LAYOUT_TABLE`, no `.editorconfig`):
-group 1 = all other non-static (ASCII-sorted); blank; group 2 = `javax.*` then `java.*`; blank; group 3 = all static. Flat-string ASCII sort; only `java`/`javax` special-cased; wildcards and CRLF/LF preserved; idempotent. Prefer the live IntelliJ MCP Optimize Imports when attached; this is the IDE-independent fallback.
+## Discovery / cache
+- `toolsmith setup [ROOT]` writes `<root>/.toolsmith/modules.json` + registers the root in `~/.config/toolsmith/roots.json`. Optional `<root>/.toolsmith/aliases.json` overrides shorthands.
+- Root resolution order: explicit arg -> `TOOLSMITH_ROOT` env -> cwd walk-up for a `.toolsmith` cache -> registry default.
+- Base package = the single-child dir chain under `src/main/java`. Traps (dir name != package): `collections`->`dev.simplified.collection`, `utils`->`dev.simplified.util`, `gson-extras`->`dev.simplified.gson`, `spring-framework`->`dev.simplified.serverapi`. `list_modules` / `toolsmith modules` return the truth - do not guess.
+
+## Import order (reorder_imports)
+IntelliJ Default: group1 other (ASCII), blank, group2 `javax.*` then `java.*`, blank, group3 static. Flat-ASCII sort; only `java`/`javax` special-cased; wildcards + CRLF/LF preserved; idempotent. See `notes/drafts/DRAFT-import-order.md` for the empirical derivation.
 
 ## Build / Test
 ```bash
@@ -33,11 +39,9 @@ python -m pytest -q
 ```
 
 ## Conventions
-- Python 3.10+ (workspace runs 3.14). Type hints on public functions; Google-style docstrings ("Args:"/"Returns:"). PEP 8.
-- The javadoc rules in the user global CLAUDE.md govern Java sources this tool EDITS, not this Python source.
+- Python 3.10+ (workspace runs 3.14). Type hints on public functions; Google-style docstrings. PEP 8.
+- Java-source conventions (javadoc/exceptions/etc. in the user global CLAUDE.md) govern the Java files this tool EDITS, not this Python source.
 
 ## Info
-- Package: `toolsmith`, version `0.1.0`, license Apache-2.0
-- Deps: `fastmcp>=1.0` (+ `pytest` for dev)
-- Registered via a project-scoped `.mcp.json` at the workspace root (see `.mcp.json.example`)
-- `SIMPLIFIED_ROOT` env var overrides the workspace root (default `W:/Workspace/Java/Simplified`)
+- Package `toolsmith` 0.1.0, Apache-2.0. Deps: `fastmcp>=1.0` (+ `pytest` for dev).
+- `notes/` holds the token-optimization audit that produced this project (raw evidence in `notes/data/` is gitignored).
