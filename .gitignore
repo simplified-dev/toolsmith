@@ -31,3 +31,7 @@ Thumbs.db
 
 # Local MCP registration (copy .mcp.json.example where you need it)
 /.mcp.json
+
+# Raw session-derived audit evidence: verbatim excerpts from private sessions.
+# Kept locally under notes/data for reference; never committed/pushed.
+/notes/data/
