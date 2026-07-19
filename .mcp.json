@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "toolsmith": {
+      "command": "toolsmith",
+      "args": ["serve"]
+    }
+  }
+}

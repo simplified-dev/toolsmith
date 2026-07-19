@@ -29,8 +29,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Local MCP registration (copy .mcp.json.example where you need it)
-/.mcp.json
+# Per-workspace discovery cache (written by `toolsmith setup` at the SCANNED root,
+# not here; this guard is only for a stray cache at the repo root).
+/.toolsmith/
 
 # Raw session-derived audit evidence: verbatim excerpts from private sessions.
 # Kept locally under notes/data for reference; never committed/pushed.

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "toolsmith",
+  "description": "General-purpose Java workspace dev tools for Claude (MCP server + skills).",
+  "owner": { "name": "Simplified" },
+  "plugins": [
+    {
+      "name": "toolsmith",
+      "description": "Java workspace dev tools: module discovery, gradle verify, JUnit tally, IntelliJ-faithful import reorder, javadoc normalize, and Java refactor / move / audit skills.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

@@ -73,7 +73,10 @@ def _cmd_reorder(args: argparse.Namespace) -> int:
 
 def _cmd_javadoc(args: argparse.Namespace) -> int:
     from . import javadoc
-    return javadoc.main((["--fix"] if args.fix else []) + ["--scope", args.scope] + args.paths)
+    argv = (["--fix"] if args.fix else []) + ["--scope", args.scope]
+    for prefix in args.prefix:
+        argv += ["--prefix", prefix]
+    return javadoc.main(argv + args.paths)
 
 
 def _cmd_locate(args: argparse.Namespace) -> int:
@@ -130,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("paths", nargs="+")
     s.add_argument("--fix", action="store_true")
     s.add_argument("--scope", default="all", choices=["class", "method", "field", "all"])
+    s.add_argument("--prefix", action="append", default=[], help="extra FQN top-level prefix (repeatable)")
     s.set_defaults(func=_cmd_javadoc)
 
     s = sub.add_parser("locate", help="find a class file by name across module sources")

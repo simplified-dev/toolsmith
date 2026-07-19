@@ -1,0 +1,9 @@
+{
+  "name": "toolsmith",
+  "version": "0.1.0",
+  "description": "General-purpose Java workspace dev tools for Claude: discover modules, gradle verify, JUnit tally, IntelliJ-faithful import reorder, and javadoc normalize as MCP tools, plus bundled Java refactor / move / audit skills.",
+  "author": { "name": "Simplified" },
+  "license": "Apache-2.0",
+  "keywords": ["java", "gradle", "mcp", "developer-tools", "intellij", "imports", "refactor"],
+  "repository": "https://github.com/simplified-dev/toolsmith"
+}
