@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "toolsmith": {
+      "command": "toolsmith",
+      "env": {
+        "SIMPLIFIED_ROOT": "W:/Workspace/Java/Simplified"
+      }
+    }
+  }
+}
