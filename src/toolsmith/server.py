@@ -15,6 +15,7 @@ from fastmcp import FastMCP
 from . import gradle as _gradle
 from . import imports as _imports
 from . import javadoc as _javadoc
+from . import modules as _modules
 from . import tally as _tally
 
 mcp = FastMCP("toolsmith")
@@ -97,6 +98,23 @@ def javadoc_normalize(
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         code = _javadoc.main(argv)
     return {"fixed": fix, "exit_code": code, "output": buf.getvalue()[-8000:]}
+
+
+@mcp.tool()
+def list_modules() -> dict:
+    """List the workspace's discovered gradle modules.
+
+    Each module: name, path (workspace-relative), package (base Java package),
+    shorthand (short alias), buildable. Reads the cache written by `toolsmith
+    setup`. Use this to look up a module's real base package or alias instead of
+    guessing paths - several package roots do not match the directory name.
+    """
+    root = _modules.workspace_root()
+    mods = _modules.get_modules()
+    if not mods:
+        return {"root": root.as_posix() if root else None, "modules": [],
+                "note": "no inventory - run `toolsmith setup` in the workspace"}
+    return {"root": root.as_posix(), "count": len(mods), "modules": mods}
 
 
 def main() -> None:

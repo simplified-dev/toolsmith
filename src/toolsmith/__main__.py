@@ -1,7 +1,9 @@
-"""Enables `python -m toolsmith` to launch the stdio MCP server."""
+"""Enables `python -m toolsmith <subcommand>` to run the CLI (e.g. `serve`)."""
 from __future__ import annotations
 
-from .server import main
+import sys
+
+from .cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

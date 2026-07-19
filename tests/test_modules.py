@@ -1,39 +1,55 @@
-"""Tests for module resolution and the authoritative package-root map."""
+"""Tests for module discovery and cache-backed resolution."""
 from __future__ import annotations
 
-import pytest
-
-from toolsmith.modules import (
-    ALIASES,
-    PACKAGE_ROOTS,
-    WORKSPACE,
-    package_root,
-)
+from toolsmith import discovery, modules
 
 
-def test_counter_intuitive_package_roots():
-    # The roots that do NOT match the module directory name - the traps that
-    # cause wrong-path guesses. Pinned so a careless edit can't silently break them.
-    assert PACKAGE_ROOTS["collections"] == "dev.simplified.collection"  # singular
-    assert PACKAGE_ROOTS["utils"] == "dev.simplified.util"              # singular
-    assert PACKAGE_ROOTS["gson-extras"] == "dev.simplified.gson"
-    assert PACKAGE_ROOTS["spring-framework"] == "dev.simplified.serverapi"
-    assert PACKAGE_ROOTS["discord4j-framework"] == "dev.simplified.discordapi"
+def _make_module(root, rel, pkg_path):
+    d = root / rel
+    d.mkdir(parents=True)
+    (d / "build.gradle.kts").write_text("", encoding="utf-8")
+    smj = d / "src" / "main" / "java"
+    (smj / pkg_path).mkdir(parents=True)
+    (smj / pkg_path / "X.java").write_text(
+        "package " + pkg_path.replace("/", ".") + ";\n", encoding="utf-8")
 
 
-def test_package_root_resolves_through_alias():
-    assert package_root("coll") == "dev.simplified.collection"
-    assert package_root("spring") == "dev.simplified.serverapi"
-    assert package_root("ar") == "lib.minecraft.renderer"
+def test_scan_finds_modules_and_base_packages(tmp_path):
+    _make_module(tmp_path, "libs/collections", "dev/acme/collection")  # singular pkg leaf
+    _make_module(tmp_path, "libs/utils", "dev/acme/util")
+    root, mods = discovery.scan(tmp_path)
+    by_name = {m["name"]: m for m in mods}
+    assert by_name["collections"]["package"] == "dev.acme.collection"
+    assert by_name["utils"]["package"] == "dev.acme.util"
+    assert by_name["collections"]["path"] == "libs/collections"
+    assert all(m["buildable"] for m in mods)
 
 
-def test_every_alias_target_has_a_package_root_or_is_toolsmith():
-    for rel in ALIASES.values():
-        name = rel.rsplit("/", 1)[-1]
-        assert name in PACKAGE_ROOTS or name == "toolsmith", name
+def test_assign_shorthands_unique_and_override():
+    mods = [{"name": n} for n in ("asset-renderer", "minecraft-text", "reflection", "records")]
+    discovery.assign_shorthands(mods, overrides={"reflection": "refl"})
+    sh = {m["name"]: m["shorthand"] for m in mods}
+    assert sh["asset-renderer"] == "ar"   # acronym of hyphen words
+    assert sh["minecraft-text"] == "mt"
+    assert sh["reflection"] == "refl"      # override honored
+    assert len(set(sh.values())) == len(sh)  # all unique
 
 
-@pytest.mark.skipif(not WORKSPACE.is_dir(), reason="workspace not present on this machine")
-def test_all_aliases_point_to_real_dirs():
-    missing = [rel for rel in ALIASES.values() if not (WORKSPACE / rel).is_dir()]
-    assert missing == []
+def test_setup_load_and_resolve_roundtrip(tmp_path, monkeypatch):
+    _make_module(tmp_path, "m/collections", "dev/acme/collection")
+    monkeypatch.setattr(discovery, "REGISTRY", tmp_path / "reg.json")
+    (tmp_path / ".toolsmith").mkdir()
+    (tmp_path / ".toolsmith" / "aliases.json").write_text('{"collections": "coll"}', encoding="utf-8")
+
+    root, mods = discovery.run_setup(tmp_path)
+    assert (tmp_path / ".toolsmith" / "modules.json").is_file()
+    assert (tmp_path / "reg.json").is_file()  # root registered
+
+    monkeypatch.setenv("TOOLSMITH_ROOT", str(tmp_path))
+    modules.reload()
+    try:
+        assert modules.package_root("collections") == "dev.acme.collection"
+        assert modules.package_root("coll") == "dev.acme.collection"  # override shorthand
+        assert modules.resolve_module("coll").resolve() == (tmp_path / "m" / "collections").resolve()
+    finally:
+        modules.reload()  # don't leak the tmp inventory into other tests

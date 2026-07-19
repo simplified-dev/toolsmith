@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 
-from .modules import WORKSPACE, find_gradle_root, resolve_module
+from .modules import find_gradle_root, resolve_module, workspace_root
 
 # Lines every hand-written gradle invocation strips.
 _NOISE = re.compile(
@@ -55,7 +55,7 @@ def gradle_verify(
     mod_dir = resolve_module(module)
     if mod_dir is None:
         return {"module": module, "ok": False,
-                "error": f"module '{module}' not found under {WORKSPACE}"}
+                "error": f"module '{module}' not resolved (run 'toolsmith setup'); root={workspace_root()}"}
 
     root = find_gradle_root(mod_dir)
     if root is None:

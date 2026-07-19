@@ -18,7 +18,7 @@ dependencies = ["fastmcp>=1.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-toolsmith = "toolsmith.server:main"
+toolsmith = "toolsmith.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/simplified-dev/toolsmith"
