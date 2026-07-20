@@ -27,23 +27,22 @@ from .modules import find_gradle_root, resolve_module, workspace_root
 # raise it per call via the timeout argument.
 _TIMEOUT_SECONDS = 600
 
-# Windows only: spawn the client with no console of its own.
+# Windows only: give the client a console of its own rather than the one the
+# MCP server hands down.
 #
 # The gradlew client probes whether its stdin is a terminal
 # (RunBuildAction -> NativePlatformConsoleDetector.isConsoleInput ->
 # WindowsConsoleFunctions.isConsole). Windows console APIs are ALPC calls into
-# conhost.exe, and under the MCP server that probe blocks forever - the thread
-# sits RUNNABLE in the native frame burning no CPU, and the build never reaches
-# the daemon. It does not reproduce from a plain harness, only from a process
-# spawned by the MCP server, so the console the server hands down is implicated
-# even though re-attaching to that same console does not reproduce it either.
+# conhost.exe, and against the inherited console that probe blocks forever -
+# the thread sits RUNNABLE in the native frame burning no CPU, and the build
+# never reaches the daemon. Handing the child a fresh console clears it.
 #
-# DETACHED_PROCESS sidesteps the question entirely: with no console attached
-# there is no conhost to call, so the probe fails fast and gradle takes its
-# non-interactive path - which is what we want anyway, since output is fully
-# redirected to a file below. If this proves insufficient, the next lever is
-# CREATE_NO_WINDOW (a fresh, windowless console rather than none at all).
-_NO_CONSOLE = getattr(subprocess, "DETACHED_PROCESS", 0) if os.name == "nt" else 0
+# CREATE_NO_WINDOW rather than DETACHED_PROCESS, though both clear the wedge:
+# gradlew is a .bat, so it runs under cmd.exe, and cmd.exe always wants a
+# console. DETACHED_PROCESS only denies it the inherited one, so Windows grants
+# a brand-new *visible* one - a console window flashes on screen for every
+# build. CREATE_NO_WINDOW grants the same fresh console without a window.
+_NO_CONSOLE = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 # Lines every hand-written gradle invocation strips.
 _NOISE = re.compile(
