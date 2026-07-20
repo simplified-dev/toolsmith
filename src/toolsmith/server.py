@@ -42,6 +42,23 @@ def gradle_verify(
         rerun: force re-execution past up-to-date checks and the build cache
             (--rerun-tasks) so tests actually run instead of restoring
             FROM-CACHE. Note: clean does not do this.
+
+    Returns:
+        module, tasks, root, exit_code, ok, first_failure, lines, lines_kind.
+        On timeout, ok is False, exit_code is None, and timed_out is True.
+
+        Check lines_kind before reading anything into `lines`:
+          "signal" - lines matched as failure diagnostics. Meaningful.
+          "tail"   - no diagnostics matched, so this is just the last few
+                     non-noise lines the build happened to print. It is NOT a
+                     summary or a verdict, and on a passing run it is usually
+                     unrelated chatter from whatever the build shelled out to.
+          "empty"  - the build printed nothing after noise stripping. Normal
+                     for a clean run under -q; not evidence the build no-opped.
+
+        In particular `lines` is never a test tally. Counts printed there come
+        from whatever the build spawned, not from gradle_verify - use test_tally
+        or the JUnit XML for real numbers.
     """
     return _gradle.gradle_verify(module, tasks=tasks, tail=tail,
                                  compile_only=compile_only, rerun=rerun)
