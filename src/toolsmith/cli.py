@@ -45,7 +45,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 def _cmd_verify(args: argparse.Namespace) -> int:
     r = gradle.gradle_verify(args.module, tasks=args.tasks or None, tail=args.tail,
-                             compile_only=args.compile_only)
+                             compile_only=args.compile_only, rerun=args.rerun)
     if r.get("error"):
         print(r["error"], file=sys.stderr)
         return 2
@@ -117,6 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("tasks", nargs="*")
     s.add_argument("--tail", type=int, default=25)
     s.add_argument("--compile-only", action="store_true")
+    s.add_argument("--rerun", action="store_true",
+                   help="force re-execution past up-to-date + build cache (--rerun-tasks)")
     s.set_defaults(func=_cmd_verify)
 
     s = sub.add_parser("tally", help="JUnit result tally")

@@ -40,6 +40,7 @@ def gradle_verify(
     tasks: list[str] | None = None,
     tail: int = 25,
     compile_only: bool = False,
+    rerun: bool = False,
     timeout: float = _TIMEOUT_SECONDS,
 ) -> dict:
     """Runs the module-scoped gradle gate and returns a structured verdict.
@@ -50,6 +51,10 @@ def gradle_verify(
             compileJava+compileTestJava when compile_only is set.
         tail: how many signal (or de-noised trailing) lines to return.
         compile_only: use the compile-only default task set.
+        rerun: pass --rerun-tasks so tasks re-run past up-to-date checks and
+            the build cache (avoids FROM-CACHE - the tests actually execute).
+            Note that clean does NOT do this: it only deletes build/, which
+            the build cache immediately restores.
         timeout: seconds before the build is killed and the gate fails.
 
     Returns:
@@ -74,6 +79,14 @@ def gradle_verify(
     invoke = tasks if root == mod_dir else [f":{module}:{t}" for t in tasks]
     gradlew = str(root / ("gradlew.bat" if os.name == "nt" else "gradlew"))
 
+    # Base flags. --rerun-tasks goes HERE, not in `invoke`: for a subproject
+    # every `invoke` element is wrapped as ':module:task', which would mangle a
+    # flag. It forces re-execution past both up-to-date checks and the build
+    # cache, so tests actually run instead of being restored FROM-CACHE.
+    flags = ["-q", "--console=plain"]
+    if rerun:
+        flags.append("--rerun-tasks")
+
     # Redirect gradle's output to a temp FILE and wait on the process, rather
     # than capture_output=True (OS pipes). Waiting on a pipe means waiting for
     # its EOF, and on Windows a surviving descendant of the gradlew client - the
@@ -91,7 +104,7 @@ def gradle_verify(
         with open(log_path, "w", encoding="utf-8", errors="replace") as sink:
             try:
                 proc = subprocess.run(
-                    [gradlew, *invoke, "-q", "--console=plain"],
+                    [gradlew, *invoke, *flags],
                     cwd=str(root),
                     stdout=sink,
                     stderr=subprocess.STDOUT,

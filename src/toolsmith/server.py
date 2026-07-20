@@ -27,6 +27,7 @@ def gradle_verify(
     tasks: list[str] | None = None,
     tail: int = 25,
     compile_only: bool = False,
+    rerun: bool = False,
 ) -> dict:
     """Run the module-scoped gradle gate and return a structured pass/fail result.
 
@@ -38,8 +39,12 @@ def gradle_verify(
         tasks: gradle tasks to run. Defaults to compileJava+test.
         tail: how many signal / de-noised trailing lines to return.
         compile_only: use compileJava+compileTestJava as the default task set.
+        rerun: force re-execution past up-to-date checks and the build cache
+            (--rerun-tasks) so tests actually run instead of restoring
+            FROM-CACHE. Note: clean does not do this.
     """
-    return _gradle.gradle_verify(module, tasks=tasks, tail=tail, compile_only=compile_only)
+    return _gradle.gradle_verify(module, tasks=tasks, tail=tail,
+                                 compile_only=compile_only, rerun=rerun)
 
 
 @mcp.tool()
