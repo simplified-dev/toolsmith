@@ -15,8 +15,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 
 from .modules import find_gradle_root, resolve_module, workspace_root
+
+# Hard backstop so a wedged build fails the gate instead of hanging forever.
+_TIMEOUT_SECONDS = 1800
 
 # Lines every hand-written gradle invocation strips.
 _NOISE = re.compile(
@@ -36,6 +40,7 @@ def gradle_verify(
     tasks: list[str] | None = None,
     tail: int = 25,
     compile_only: bool = False,
+    timeout: float = _TIMEOUT_SECONDS,
 ) -> dict:
     """Runs the module-scoped gradle gate and returns a structured verdict.
 
@@ -45,9 +50,11 @@ def gradle_verify(
             compileJava+compileTestJava when compile_only is set.
         tail: how many signal (or de-noised trailing) lines to return.
         compile_only: use the compile-only default task set.
+        timeout: seconds before the build is killed and the gate fails.
 
     Returns:
         dict with module, tasks, root, exit_code, ok, first_failure, lines.
+        On timeout, ok is False, exit_code is None, and timed_out is True.
     """
     if tasks is None:
         tasks = ["compileJava", "compileTestJava"] if compile_only else ["compileJava", "test"]
@@ -67,25 +74,64 @@ def gradle_verify(
     invoke = tasks if root == mod_dir else [f":{module}:{t}" for t in tasks]
     gradlew = str(root / ("gradlew.bat" if os.name == "nt" else "gradlew"))
 
-    proc = subprocess.run(
-        [gradlew, *invoke, "-q", "--console=plain"],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-    )
-    lines = (proc.stdout + proc.stderr).splitlines()
+    # Redirect gradle's output to a temp FILE and wait on the process, rather
+    # than capture_output=True (OS pipes). Waiting on a pipe means waiting for
+    # its EOF, and on Windows a surviving descendant of the gradlew client - the
+    # Gradle daemon, a forked test worker, or a test's own inheritIO()
+    # subprocess - can inherit the pipe's write handle and outlive the client,
+    # so the read blocks on an EOF that never arrives even though the build
+    # already finished (an intermittent, unbounded hang). A file wait keys off
+    # the direct child's exit and is immune - this is what the original bash
+    # gate did. timeout is a hard backstop against a genuinely wedged build.
+    fd, log_path = tempfile.mkstemp(prefix="toolsmith-gradle-", suffix=".log")
+    os.close(fd)
+    returncode: int | None = None
+    timed_out = False
+    try:
+        with open(log_path, "w", encoding="utf-8", errors="replace") as sink:
+            try:
+                proc = subprocess.run(
+                    [gradlew, *invoke, "-q", "--console=plain"],
+                    cwd=str(root),
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                )
+                returncode = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    finally:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
+
     signal = [ln for ln in lines if _SIGNAL.search(ln) and not _NOISE.search(ln)]
     if signal:
         kept = signal[:tail]
     else:
         kept = [ln for ln in lines if ln.strip() and not _NOISE.search(ln)][-tail:]
 
+    if timed_out:
+        return {
+            "module": module,
+            "tasks": invoke,
+            "root": str(root),
+            "exit_code": None,
+            "ok": False,
+            "timed_out": True,
+            "first_failure": f"gradle timed out after {timeout:g}s",
+            "lines": kept,
+        }
+
     return {
         "module": module,
         "tasks": invoke,
         "root": str(root),
-        "exit_code": proc.returncode,
-        "ok": proc.returncode == 0,
+        "exit_code": returncode,
+        "ok": returncode == 0,
         "first_failure": signal[0] if signal else None,
         "lines": kept,
     }
