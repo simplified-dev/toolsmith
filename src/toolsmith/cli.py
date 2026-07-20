@@ -49,6 +49,11 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     if r.get("error"):
         print(r["error"], file=sys.stderr)
         return 2
+    # Flag a tail so it is not read as a summary - it is only the last few
+    # lines the build happened to print, often from something it shelled out
+    # to. On stderr so a piped stdout stays clean. See gradle_verify's docstring.
+    if r["lines"] and r.get("lines_kind") == "tail":
+        print("-- trailing build output, not a summary --", file=sys.stderr)
     for line in r["lines"]:
         print(line)
     print(f"GATE: {'PASS' if r['ok'] else 'FAIL'} rc={r['exit_code']}")
