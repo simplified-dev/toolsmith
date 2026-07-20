@@ -20,7 +20,30 @@ import tempfile
 from .modules import find_gradle_root, resolve_module, workspace_root
 
 # Hard backstop so a wedged build fails the gate instead of hanging forever.
-_TIMEOUT_SECONDS = 1800
+# Kept well above a real cold cross-JDK run (single-digit minutes) but low
+# enough that a wedge - e.g. the client blocking in its native console probe
+# before it ever reaches the daemon - surfaces while it is still actionable
+# rather than burning half an hour. Callers with a genuinely long gate can
+# raise it per call via the timeout argument.
+_TIMEOUT_SECONDS = 600
+
+# Windows only: spawn the client with no console of its own.
+#
+# The gradlew client probes whether its stdin is a terminal
+# (RunBuildAction -> NativePlatformConsoleDetector.isConsoleInput ->
+# WindowsConsoleFunctions.isConsole). Windows console APIs are ALPC calls into
+# conhost.exe, and under the MCP server that probe blocks forever - the thread
+# sits RUNNABLE in the native frame burning no CPU, and the build never reaches
+# the daemon. It does not reproduce from a plain harness, only from a process
+# spawned by the MCP server, so the console the server hands down is implicated
+# even though re-attaching to that same console does not reproduce it either.
+#
+# DETACHED_PROCESS sidesteps the question entirely: with no console attached
+# there is no conhost to call, so the probe fails fast and gradle takes its
+# non-interactive path - which is what we want anyway, since output is fully
+# redirected to a file below. If this proves insufficient, the next lever is
+# CREATE_NO_WINDOW (a fresh, windowless console rather than none at all).
+_NO_CONSOLE = getattr(subprocess, "DETACHED_PROCESS", 0) if os.name == "nt" else 0
 
 # Lines every hand-written gradle invocation strips.
 _NOISE = re.compile(
@@ -96,6 +119,12 @@ def gradle_verify(
     # already finished (an intermittent, unbounded hang). A file wait keys off
     # the direct child's exit and is immune - this is what the original bash
     # gate did. timeout is a hard backstop against a genuinely wedged build.
+    #
+    # stdin is DEVNULL as hygiene: under the MCP server our stdin is the stdio
+    # JSON-RPC pipe, and a child must never be able to read protocol bytes off
+    # it. (Not a fix for any observed hang - an inherited pipe stdin does not
+    # by itself wedge the client.) The console-probe wedge is handled by
+    # _NO_CONSOLE instead.
     fd, log_path = tempfile.mkstemp(prefix="toolsmith-gradle-", suffix=".log")
     os.close(fd)
     returncode: int | None = None
@@ -106,8 +135,10 @@ def gradle_verify(
                 proc = subprocess.run(
                     [gradlew, *invoke, *flags],
                     cwd=str(root),
+                    stdin=subprocess.DEVNULL,
                     stdout=sink,
                     stderr=subprocess.STDOUT,
+                    creationflags=_NO_CONSOLE,
                     timeout=timeout,
                 )
                 returncode = proc.returncode
