@@ -80,8 +80,23 @@ def gradle_verify(
         timeout: seconds before the build is killed and the gate fails.
 
     Returns:
-        dict with module, tasks, root, exit_code, ok, first_failure, lines.
-        On timeout, ok is False, exit_code is None, and timed_out is True.
+        dict with module, tasks, root, exit_code, ok, first_failure, lines,
+        lines_kind. On timeout, ok is False, exit_code is None, and timed_out
+        is True.
+
+        lines_kind says what `lines` actually holds, and must be checked before
+        reading anything into it:
+          "signal" - lines matched as failure diagnostics. Meaningful.
+          "tail"   - no diagnostics matched, so this is just the last few
+                     non-noise lines the build happened to print. It is NOT a
+                     summary or a verdict, and on a passing run it is usually
+                     unrelated chatter from whatever the build shelled out to.
+          "empty"  - the build printed nothing after noise stripping. Normal
+                     for a clean run under -q; not evidence the build no-opped.
+
+        In particular `lines` is never a test tally. Counts printed there come
+        from whatever the build spawned, not from gradle_verify - use test_tally
+        or the JUnit XML for real numbers.
     """
     if tasks is None:
         tasks = ["compileJava", "compileTestJava"] if compile_only else ["compileJava", "test"]
@@ -110,14 +125,28 @@ def gradle_verify(
         flags.append("--rerun-tasks")
 
     # Redirect gradle's output to a temp FILE and wait on the process, rather
-    # than capture_output=True (OS pipes). Waiting on a pipe means waiting for
-    # its EOF, and on Windows a surviving descendant of the gradlew client - the
-    # Gradle daemon, a forked test worker, or a test's own inheritIO()
-    # subprocess - can inherit the pipe's write handle and outlive the client,
-    # so the read blocks on an EOF that never arrives even though the build
-    # already finished (an intermittent, unbounded hang). A file wait keys off
-    # the direct child's exit and is immune - this is what the original bash
-    # gate did. timeout is a hard backstop against a genuinely wedged build.
+    # than capture_output=True (OS pipes). Two reasons, both about waiting on
+    # the pipe's EOF rather than on the child's exit:
+    #
+    # 1. A surviving descendant can hold the write handle open. Anything that
+    #    inherits gradle's stdout - the daemon, a forked test worker, or a test
+    #    that spawns its own subprocess with ProcessBuilder.inheritIO() - keeps
+    #    that handle alive after the client exits, so the read blocks on an EOF
+    #    that never arrives even though the build already finished. Not
+    #    hypothetical: the annotations gate runs a test that launches the
+    #    showcase jar with inheritIO(), and its output lands in this log.
+    # 2. It is what makes `timeout` trustworthy. On a timeout CPython kills the
+    #    child and then, on Windows only, calls communicate() a second time with
+    #    NO timeout to drain the pipes (see subprocess.run, the _mswindows
+    #    branch). Given (1) that drain can never return - so with pipes the
+    #    backstop meant to turn a wedge into ok=False would itself hang. A file
+    #    sink has nothing to drain.
+    #
+    # A file wait keys off the direct child's exit and is immune to both; it is
+    # also what the original bash gate did before the Python port introduced
+    # capture_output. This is a DIFFERENT failure from the console-probe wedge
+    # handled by _NO_CONSOLE: that one blocks the client before any daemon work
+    # begins, this one blocks the parent after the build has already finished.
     #
     # stdin is DEVNULL as hygiene: under the MCP server our stdin is the stdio
     # JSON-RPC pipe, and a child must never be able to read protocol bytes off
@@ -151,11 +180,16 @@ def gradle_verify(
         except OSError:
             pass
 
+    # Signal lines are diagnostics; the tail fallback is only "whatever the
+    # build last printed". They are not interchangeable, so the caller is told
+    # which one it got - an unlabelled tail reads as a summary and gets
+    # believed. See lines_kind in the docstring.
     signal = [ln for ln in lines if _SIGNAL.search(ln) and not _NOISE.search(ln)]
     if signal:
-        kept = signal[:tail]
+        kept, kind = signal[:tail], "signal"
     else:
         kept = [ln for ln in lines if ln.strip() and not _NOISE.search(ln)][-tail:]
+        kind = "tail" if kept else "empty"
 
     if timed_out:
         return {
@@ -167,6 +201,7 @@ def gradle_verify(
             "timed_out": True,
             "first_failure": f"gradle timed out after {timeout:g}s",
             "lines": kept,
+            "lines_kind": kind,
         }
 
     return {
@@ -177,4 +212,5 @@ def gradle_verify(
         "ok": returncode == 0,
         "first_failure": signal[0] if signal else None,
         "lines": kept,
+        "lines_kind": kind,
     }
