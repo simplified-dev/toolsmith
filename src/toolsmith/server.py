@@ -15,6 +15,7 @@ from fastmcp import FastMCP
 from . import gradle as _gradle
 from . import imports as _imports
 from . import javadoc as _javadoc
+from . import jitpack as _jitpack
 from . import modules as _modules
 from . import tally as _tally
 
@@ -120,6 +121,89 @@ def javadoc_normalize(
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         code = _javadoc.main(argv)
     return {"fixed": fix, "exit_code": code, "output": buf.getvalue()[-8000:]}
+
+
+@mcp.tool()
+def jitpack_status(module: str, refs: list[str] | None = None) -> dict:
+    """Report whether a module's commits are built on JitPack. Never triggers a build.
+
+    Replaces `curl -s https://jitpack.io/api/builds/com.github.<org>/<artifact>`
+    plus the local git work needed to know which sha to look for. Reads exactly
+    one URL - the versionless build list - so it is safe to call freely. Run it
+    BEFORE jitpack_build: an already-ok sha costs no build there, only a cached
+    artifact read that confirms the record.
+
+    Args:
+        module: module alias (e.g. "d4j"), name, or path.
+        refs: git refs or short shas to report on. Empty asks about
+            origin/HEAD (never the local HEAD), which is the only ref worth
+            pinning.
+
+    Returns:
+        module, group, artifact, org, repo, repo_dir, records, counts
+        (total/ok/error/in-flight/unknown) and refs - one entry per requested
+        ref with ref (7-char sha), full, source, pushed, status, state, ok.
+        ok is True only when every requested ref is built.
+
+        A precondition failure - module unresolved, no git remote, ref not
+        resolvable/pushed/ambiguous, or a module that publishes to Maven
+        Central - sets a top-level error instead.
+    """
+    return _jitpack.jitpack_status(module, refs=refs or ())
+
+
+@mcp.tool()
+def jitpack_build(
+    module: str,
+    ref: str = "",
+    timeout: float = _jitpack.MCP_BUILD_TIMEOUT,
+    force: bool = False,
+) -> dict:
+    """Precheck, then trigger and wait for ONE JitPack build of a module's commit.
+
+    Replaces the hand-authored
+    `curl -o /dev/null -w "%{http_code}" --max-time N <jitpack>/<...>.pom` round.
+    The ref is validated from local git before anything is requested, one list
+    read prechecks it, then a single blocking GET both triggers the build and
+    waits for it.
+
+    Traps this encodes, none of them discoverable from JitPack's docs:
+      - Never call the per-version /api/builds/<group>/<artifact>/<version>
+        endpoint yourself: it silently STARTS A BUILD and its records go stale
+        for months.
+      - status "timeout" is INCONCLUSIVE, not a failure. The build continues
+        server-side; call this tool again and it attaches to the same build
+        rather than starting a second one. resume is True in that case.
+      - status "cached-failure" never changes for the same sha - not with
+        force, not on retry. It needs a NEW COMMIT.
+      - A list record saying "ok" is never the verdict on its own: the list
+        reports ok for artifacts that answer 404, so ok means an HTTP 200 on
+        the .pom and nothing less. status "already-built" carries that 200.
+      - A green build is a COMPILE check: JitPack builds with -xtest, and
+        composite includeBuild substitution means a green consumer build proves
+        nothing. Use gradle_verify from the module dir for a real gate.
+
+    Args:
+        module: module alias, name, or path.
+        ref: git ref or short sha. Empty resolves origin/HEAD, never local HEAD.
+        timeout: seconds to hold the blocking request. The default sits below a
+            typical harness cap so a slow build returns a clean "timeout" dict
+            instead of killing the call.
+        force: re-request a sha the precheck already reported.
+
+    Returns:
+        module, group, artifact, org, repo, ref, full_sha, source, precheck,
+        action, url, http_code, elapsed, log_tail (capped), hints, ok and
+        status - one of built, already-built, failed, cached-failure, timeout,
+        in-flight, symbolic, precondition, error. A success also carries pin
+        (the ready-to-paste strictly line); a failure carries error and the
+        build.log tail.
+    """
+    return _jitpack.jitpack_build(module, ref=ref or None, timeout=timeout, force=force)
+
+
+# Workspace pin drift (`toolsmith jitpack pins`) is deliberately CLI-only, like
+# setup and locate: it is a wide table for a human, not a call in an agent loop.
 
 
 @mcp.tool()

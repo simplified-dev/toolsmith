@@ -67,6 +67,8 @@ Run `/mcp` to confirm the `toolsmith` server loaded. (Standalone alternative: sk
 | `test_tally` | `build/test-results/test/*.xml` -> `{tests, passed, failed, errors, skipped, failing_tests[]}`. |
 | `reorder_imports` | Java imports to the IntelliJ **Default** layout, byte-for-byte. Idempotent; wildcard- and CRLF-safe. |
 | `javadoc_normalize` | Audit or `--fix` javadocs against the project conventions. |
+| `jitpack_status` | Is a module's commit built on JitPack? One read of the versionless build list - **never** triggers a build. |
+| `jitpack_build` | Precheck, then trigger and wait for **one** build of a sha. Returns the verdict, the ready-to-paste `strictly(...)` pin, and the failing `build.log` tail. |
 
 ## Bundled skills
 
@@ -91,6 +93,9 @@ toolsmith tally d4j             # JUnit tally
 toolsmith reorder --check src   # import order gate (or without --check to rewrite)
 toolsmith javadoc --fix src     # javadoc audit / fix
 toolsmith locate TypeRegistrar  # find a class file across module sources
+toolsmith jitpack status d4j    # are the module's commits built on JitPack (read-only)
+toolsmith jitpack build d4j     # trigger + wait for one build; prints the strictly(<sha>) pin
+toolsmith jitpack pins          # workspace pin-drift table (commits behind / unbuilt / stale)
 toolsmith serve                 # run the stdio MCP server (what the plugin launches)
 ```
 
@@ -114,7 +119,7 @@ src/toolsmith/
   server.py       FastMCP server (thin veneer over the modules below)
   discovery.py    scan + cache + root resolution
   modules.py      cache-backed module/alias/package lookup
-  gradle.py · tally.py · imports.py · javadoc.py   one module per tool
+  gradle.py · tally.py · imports.py · javadoc.py · jitpack.py   one module per tool
 tests/            pytest suite (discovery, reorderer, tally)
 notes/            provenance: the token-optimization audit that produced this
 ```
