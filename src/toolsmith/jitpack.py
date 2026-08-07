@@ -19,7 +19,13 @@ discoverable from JitPack's documentation:
     builds, and does not trigger.
   * A build is triggered AND waited on by a single blocking GET of the ``.pom``.
     There is no poll loop and no retry loop - every retry is another real build
-    request against a third-party service.
+    request against a third-party service. The list endpoint is the sole
+    exception and the sole request here that may be retried: it triggers
+    nothing, so a re-read costs a pause rather than a build.
+  * A list read that did not ANSWER is not an artifact with no builds. Reading
+    the two alike is how ``pins`` reported healthy pins as unbuilt - a different
+    handful on each run, because one list call per artifact back to back draws
+    throttling, and a throttled read decoded as zero records.
   * The list reports ``ok`` for artifacts that answer 404, so a record is never
     a green verdict on its own: ``build`` goes green on an HTTP 200 from the
     ``.pom`` and on nothing less. For an already-built sha that is a cache hit.
@@ -67,6 +73,13 @@ _BUILD_TIMEOUT = 900.0
 _MCP_BUILD_TIMEOUT = 480.0
 _LIST_TIMEOUT = 20.0
 _LOG_TIMEOUT = 120.0
+
+# Re-reads of the list endpoint, and the pause before each. Bounded and small:
+# this is the one request that triggers nothing, so retrying it is safe, but it
+# is still a third-party service and a burst is what provoked the throttling in
+# the first place.
+_LIST_ATTEMPTS = 3
+_LIST_BACKOFF = 0.5
 _WATCH_INTERVAL = 12.0
 _WATCH_TIMEOUT = 10.0
 _GIT_TIMEOUT = 15.0
@@ -100,7 +113,17 @@ _COMPOSITE_NOTE = ("verify standalone from the module dir, not from the workspac
 _MISMATCH_NOTE = ("jitpack's build list says 'ok' but serves no artifact for this version "
                   "(jitpack issue #7711) - the pin would not resolve; push a new commit "
                   "and re-run")
+_UNREACHABLE_NOTE = ("jitpack's build list did not answer for some artifacts - inconclusive, "
+                     "NOT a missing build; re-run, or narrow the scan with an artifact filter")
+_CONFLICT_NOTE = ("strictly() is gradle's hardest constraint, so two different pins for one "
+                  "artifact in a single graph is a resolution failure, not 'newest wins'")
 _GIT_REMEDY = "git remote add origin <url> && git push -u origin master"
+
+# Status codes meaning the list did not answer, as opposed to answering "none".
+# 429 is the one that actually bites - `pins` issues one list call per artifact
+# back to back - but a 5xx is just as much a non-answer. A 404 is deliberately
+# absent: that IS an answer, and it means jitpack has never seen the artifact.
+_LIST_RETRY_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # Sha paths never redirect, so any of these means a symbolic ref reached the
 # artifact GET. A bare status-code check reads it as failure.
@@ -526,30 +549,21 @@ def _resolve_ref(repo_dir: Path, ref: str | None = None, allow_symbolic: bool = 
             "branches": [b for b in remote_branches if "->" not in b][:5]}
 
 
-def _list_records(group: str, artifact: str, timeout: float = _LIST_TIMEOUT) -> dict:
-    """Reads the versionless build list. The only /api/ call in this codebase.
-
-    THE URL IS VERSIONLESS AND MUST STAY THAT WAY. Appending a version segment
-    reaches /api/builds/<group>/<artifact>/<version>, which silently TRIGGERS A
-    BUILD and answers from records that go stale for months. The list endpoint
-    triggers nothing, answers in ~0.1 s, reports Building while a build is in
-    flight, and is fresh within seconds of one finishing.
+def _decode_records(body: str, group: str, artifact: str) -> dict:
+    """Turns a list-endpoint body into a flat {version: status} mapping.
 
     Args:
-        group: dotted group, e.g. com.github.simplified-dev.
-        artifact: repo name.
-        timeout: seconds before the read is abandoned.
+        body: the response body.
+        group: dotted group the records were asked for.
+        artifact: repo name the records were asked for.
 
     Returns:
-        A flat {version: status} mapping. Anything unusable - 404, an outage,
-        malformed JSON, a body that is not a records map - yields {}, which
-        means "no records", never "not built".
+        The records, or {} for malformed JSON or a body that is not a records
+        map. {} here means "answered with no records" - the caller has already
+        established that it answered at all.
     """
-    response = _http(f"{_BASE}/api/builds/{group}/{artifact}", timeout=timeout)
-    if response["code"] != 200 or not response["body"]:
-        return {}
     try:
-        data = json.loads(response["body"])
+        data = json.loads(body)
     except (json.JSONDecodeError, ValueError):
         return {}
     if not isinstance(data, dict):
@@ -567,6 +581,76 @@ def _list_records(group: str, artifact: str, timeout: float = _LIST_TIMEOUT) -> 
     # and reading that as records invented two builds, one of them green, and
     # reported an unresolvable pin as fine.
     return _records_from(data)
+
+
+def _read_reason(response: dict) -> str:
+    """Says why a list read produced no answer, in the caller's words."""
+    if response["timed_out"]:
+        return f"build list timed out after {response['elapsed']}s"
+    if response["error"] is not None:
+        return f"build list request failed: {response['error']}"
+    return f"build list answered http {response['code']}"
+
+
+def _read_records(group: str, artifact: str, timeout: float = _LIST_TIMEOUT,
+                  attempts: int = _LIST_ATTEMPTS) -> dict:
+    """Reads the versionless build list. The only /api/ call in this codebase.
+
+    THE URL IS VERSIONLESS AND MUST STAY THAT WAY. Appending a version segment
+    reaches /api/builds/<group>/<artifact>/<version>, which silently TRIGGERS A
+    BUILD and answers from records that go stale for months. The list endpoint
+    triggers nothing, answers in ~0.1 s, reports Building while a build is in
+    flight, and is fresh within seconds of one finishing.
+
+    Because it triggers nothing it is also the one request in this module that
+    may be re-issued: elsewhere a retry is another real build. That matters at
+    the scale `pins` works at - one call per artifact, back to back - where a
+    throttled read used to decode as zero records and turn a healthy pin red.
+
+    An answer carrying no records and no answer at all are kept apart, because
+    only the first of them is evidence. A 404 is an ANSWER: it means jitpack has
+    never seen the artifact.
+
+    Args:
+        group: dotted group, e.g. com.github.simplified-dev.
+        artifact: repo name.
+        timeout: seconds before one read is abandoned.
+        attempts: how many times a read that did not answer is re-issued.
+
+    Returns:
+        dict with records ({version: status}), answered, http_code, error and
+        attempts. answered False means the service did not answer - never that
+        the artifact has no builds, and no caller may score it as one.
+    """
+    outcome: dict = {}
+    for attempt in range(1, max(1, attempts) + 1):
+        response = _http(f"{_BASE}/api/builds/{group}/{artifact}", timeout=timeout)
+        code = response["code"]
+        if code == 200 and response["body"]:
+            return {"records": _decode_records(response["body"], group, artifact),
+                    "answered": True, "http_code": code, "error": None, "attempts": attempt}
+        if code is not None and code not in _LIST_RETRY_CODES:
+            # An answer, just not one carrying records - a 404 for an artifact
+            # jitpack has never seen, or a 200 with an empty body. Neither
+            # improves on a re-read.
+            return {"records": {}, "answered": True, "http_code": code, "error": None,
+                    "attempts": attempt}
+        outcome = {"records": {}, "answered": False, "http_code": code,
+                   "error": _read_reason(response), "attempts": attempt}
+        if attempt < attempts:
+            time.sleep(_LIST_BACKOFF * attempt)
+    return outcome
+
+
+def _list_records(group: str, artifact: str, timeout: float = _LIST_TIMEOUT) -> dict:
+    """The records alone, for the one caller that cannot act on the difference.
+
+    Only the cosmetic watchdog reads this: it prints a progress line, where a
+    poll that failed is indistinguishable from a build that has not started.
+    Any caller whose VERDICT rests on the answer must use _read_records instead,
+    since {} here still conflates "no records" with "no answer".
+    """
+    return _read_records(group, artifact, timeout=timeout, attempts=1)["records"]
 
 
 def _records_from(data: dict) -> dict:
@@ -775,9 +859,13 @@ def jitpack_status(module: str, refs: Sequence[str] = (), timeout: float = _LIST
 
     Returns:
         dict with module, group, artifact, org, repo, repo_dir, records (the
-        record count), counts (total/ok/error/in-flight/unknown) and refs - one
-        entry per requested ref carrying ref, full, source, pushed, status,
-        state and ok. ok is True only when every requested ref is built.
+        record count), counts (total/ok/error/in-flight/unknown), list_ok and
+        refs - one entry per requested ref carrying ref, full, source, pushed,
+        status, state and ok. ok is True only when every requested ref is built.
+
+        A list read that did not answer sets list_ok False and leaves every ref
+        in state "unreachable" - inconclusive, and deliberately never "absent",
+        which would read as a ref that needs building.
 
         A precondition failure (module unresolved, no remote, ref not
         resolvable, unpushed, ambiguous, symbolic) sets a top-level error and
@@ -793,8 +881,9 @@ def jitpack_status(module: str, refs: Sequence[str] = (), timeout: float = _LIST
     # answerable left there is no question to ask jitpack, and build already
     # returns here rather than requesting anything.
     answerable = any(not resolution.get("error") for resolution in resolutions)
-    records = (_list_records(coord["group"], coord["artifact"], timeout=timeout)
-               if answerable else {})
+    read = (_read_records(coord["group"], coord["artifact"], timeout=timeout) if answerable
+            else {"records": {}, "answered": True, "error": None})
+    records = read["records"]
 
     entries: list[dict] = []
     for resolution in resolutions:
@@ -804,7 +893,7 @@ def jitpack_status(module: str, refs: Sequence[str] = (), timeout: float = _LIST
                             "error": resolution["error"]})
             continue
         status = records.get(resolution["ref"])
-        state = _classify(status)
+        state = _classify(status) if read["answered"] else "unreachable"
         entries.append({
             "ref": resolution["ref"],
             "full": resolution["full"],
@@ -822,8 +911,13 @@ def jitpack_status(module: str, refs: Sequence[str] = (), timeout: float = _LIST
         "ok": all(entry["ok"] for entry in entries),
         "records": len(records),
         "counts": _summarise(records),
+        "list_ok": read["answered"],
         "refs": entries,
     }
+    if not read["answered"]:
+        # A note rather than an error: the caller invoked this correctly and the
+        # service did not answer, which is exit code 1's territory, not 2's.
+        result["note"] = read["error"]
     if failed:
         result["error"] = failed
     return result
@@ -928,10 +1022,16 @@ def jitpack_build(module: str, ref: str | None = None, timeout: float = _BUILD_T
                 "error": f"version '{version}' is not a usable url path segment"}
 
     # ---- C. Precheck. ONE list read; it never triggers a build. ----
-    records = _list_records(coord["group"], coord["artifact"], timeout=_LIST_TIMEOUT)
-    precheck = _classify(records.get(version))
+    # A read that did not answer leaves the precheck "unknown" rather than
+    # "absent". Both still reach the trigger below - the artifact GET is the
+    # verdict either way - but only one of them is a claim about the sha.
+    read = _read_records(coord["group"], coord["artifact"], timeout=_LIST_TIMEOUT)
+    records = read["records"]
+    precheck = _classify(records.get(version)) if read["answered"] else "unknown"
     info = {**_public(coord), "ref": version, "full_sha": resolution.get("full"),
             "source": source, "symbolic": symbolic, "precheck": precheck}
+    if not read["answered"]:
+        info["precheck_error"] = read["error"]
     pin = f'{coord["group"]}:{coord["artifact"]} -> version {{ strictly("{version}") }}'
 
     if precheck == "error" and not force:
@@ -1192,14 +1292,24 @@ def jitpack_pins(artifact: str | None = None, max_behind: int | None = None,
         timeout: seconds before a list read is abandoned.
 
     Returns:
-        dict with root, pins, artifacts, total, stale, unbuilt, errors,
-        median_behind, list_calls and ok. Each pin row carries group, org,
-        artifact, pin, form (strictly/snapshot/version/unpinned), central,
-        jitpack (the raw status label), state, behind (None when it cannot be
-        counted), consumers and consumer_paths.
+        dict with root, pins, artifacts, total (distinct rows), occurrences
+        (declaration sites, which is the larger number), stale, unbuilt,
+        errors, unreachable, unpinned, conflicts, conflicting, median_behind,
+        list_calls and ok. Each pin row carries group, org, artifact, pin, form
+        (strictly/snapshot/version/unpinned), central, jitpack (the raw status
+        label), state, behind (None when it cannot be counted), conflict (how
+        many distinct pins that artifact carries workspace-wide), consumers and
+        consumer_paths.
 
-        ok is False when any non-central pin is absent from jitpack or in
-        error, or when max_behind is exceeded. Staleness alone never flips it.
+        state is one of ok/error/in-flight/unknown/absent for a pin jitpack
+        answered about, plus three that are not verdicts on a build at all:
+        "central" (Maven Central publishes it), "unpinned" (the coordinate
+        names no version, so there is nothing to ask about) and "unreachable"
+        (the list read did not answer).
+
+        ok is False when any gated pin is absent from jitpack, in error or
+        unreachable, or when max_behind is exceeded. Staleness alone never
+        flips it, and neither central nor unpinned rows are gated at all.
         A missing workspace root sets error and is exit-code-2 territory.
     """
     root = workspace_root()
@@ -1223,25 +1333,53 @@ def jitpack_pins(artifact: str | None = None, max_behind: int | None = None,
 
     rows = sorted(grouped.values(), key=lambda r: (r["artifact"], r["pin"]))
 
+    # Every distinct version declared for an artifact, so a row can say whether
+    # it is one of several. Central rows count too: two versions of one artifact
+    # is the same resolution problem wherever it is published from.
+    declared: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        if row["pin"]:
+            declared.setdefault((row["group"], row["artifact"]), set()).add(row["pin"])
+
     # ONE list call per distinct artifact - never one per pin, and never the
-    # per-version endpoint that would build each of them.
-    records: dict[tuple[str, str], dict] = {}
+    # per-version endpoint that would build each of them. An artifact whose rows
+    # are all central or unpinned names no version to ask about, so it costs no
+    # call either.
+    reads: dict[tuple[str, str], dict] = {}
     for row in rows:
         key = (row["group"], row["artifact"])
-        if row["central"] or key in records:
+        if row["central"] or row["form"] == "unpinned" or key in reads:
             continue
-        records[key] = _list_records(row["group"], row["artifact"], timeout=timeout)
+        reads[key] = _read_records(row["group"], row["artifact"], timeout=timeout)
 
     repo_dirs = _repo_dirs_by_artifact(
         {r["artifact"] for r in rows if r["form"] in ("strictly", "version") and r["pin"]})
 
     for row in rows:
+        key = (row["group"], row["artifact"])
+        row["conflict"] = len(declared.get(key, ()))
+        repo_dir = repo_dirs.get(row["artifact"])
+        row["behind"] = _behind(repo_dir, row["pin"]) if repo_dir and row["pin"] else None
         if row["central"]:
             # Maven Central publishes it; jitpack has no records at all and the
             # absence is not a fault.
             row["jitpack"], row["state"], row["behind"] = "n/a (central)", "central", None
             continue
-        artifact_records = records.get((row["group"], row["artifact"]), {})
+        if row["form"] == "unpinned":
+            # The coordinate names no version, so there is no build to ask
+            # about. Scoring this "absent" counted a missing PIN as a missing
+            # BUILD, and put a coordinate that resolves fine in the unbuilt
+            # column.
+            row["jitpack"], row["state"], row["behind"] = "n/a (unpinned)", "unpinned", None
+            continue
+        read = reads.get(key) or {}
+        if not read.get("answered"):
+            # The service did not answer, so nothing is known about this pin.
+            # Deliberately not "absent": that is a claim the read cannot support,
+            # and making it is what reported healthy pins as unbuilt.
+            row["jitpack"], row["state"] = "unreachable", "unreachable"
+            continue
+        artifact_records = read["records"]
         if row["form"] == "snapshot":
             # A SNAPSHOT pin names no concrete version, so the artifact's own
             # health is the only answerable question and drift is unmeasurable.
@@ -1253,27 +1391,40 @@ def jitpack_pins(artifact: str | None = None, max_behind: int | None = None,
         status = artifact_records.get(row["pin"])
         row["state"] = _classify(status)
         row["jitpack"] = status or "absent"
-        repo_dir = repo_dirs.get(row["artifact"])
-        row["behind"] = _behind(repo_dir, row["pin"]) if repo_dir and row["pin"] else None
 
-    gated = [row for row in rows if not row["central"]]
+    # Central and unpinned rows are reported but never gated - neither is a
+    # claim about a jitpack build, so neither can be red.
+    gated = [row for row in rows if not row["central"] and row["form"] != "unpinned"]
     behinds = sorted(row["behind"] for row in rows if row["behind"] is not None)
     over = [row for row in gated
             if max_behind is not None and row["behind"] is not None and row["behind"] > max_behind]
+    conflicting = sorted({artifact for (_group, artifact), pins in declared.items()
+                          if len(pins) > 1})
     result = {
         "ok": all(row["state"] == "ok" for row in gated) and not over,
         "root": str(root),
         "pins": rows,
+        # total counts distinct (artifact, pin) ROWS - one per table line -
+        # while occurrences counts the declaration sites they were folded from.
+        # The two differ by a factor of ~1.5 here, so neither may be labelled
+        # with a bare "pins".
         "total": len(rows),
+        "occurrences": len(occurrences),
         "artifacts": len({(row["group"], row["artifact"]) for row in rows}),
         "stale": sum(1 for row in rows if row["behind"]),
         "unbuilt": sum(1 for row in gated if row["state"] == "absent"),
         "errors": sum(1 for row in gated if row["state"] == "error"),
+        "unreachable": sum(1 for row in gated if row["state"] == "unreachable"),
+        "unpinned": sum(1 for row in rows if row["form"] == "unpinned"),
+        "conflicts": len(conflicting),
+        "conflicting": conflicting,
         "median_behind": behinds[len(behinds) // 2] if behinds else None,
         "over_max_behind": len(over),
         "max_behind": max_behind,
-        "list_calls": len(records),
+        "list_calls": len(reads),
     }
+    if result["unreachable"]:
+        result["note"] = _UNREACHABLE_NOTE
     if not rows:
         result["note"] = (f"no jitpack pins found under {root}"
                           + (f" matching '{artifact}'" if artifact else ""))

@@ -125,6 +125,23 @@ def _yn(value: object) -> str:
     return "yes" if value else "no"
 
 
+def _print(text: str, file=sys.stdout) -> None:
+    """Prints text a console encoding may not be able to represent.
+
+    A build log is arbitrary third-party output and a Windows console is cp1252,
+    which is enough for print to raise UnicodeEncodeError and take the whole log
+    tail with it - at the one moment it is the only diagnostic there is. The
+    check is done before printing rather than around it, so a stream that fails
+    part-way cannot emit the line twice.
+    """
+    encoding = getattr(file, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        text = text.encode(encoding, "replace").decode(encoding, "replace")
+    print(text, file=file)
+
+
 def _jitpack_notes(r: dict) -> None:
     """Sends the diagnostic half of a jitpack result to stderr.
 
@@ -133,11 +150,11 @@ def _jitpack_notes(r: dict) -> None:
     final JITPACK: line.
     """
     if r.get("log_note"):
-        print(r["log_note"], file=sys.stderr)
+        _print(r["log_note"], file=sys.stderr)
     if r.get("error"):
-        print(r["error"], file=sys.stderr)
+        _print(r["error"], file=sys.stderr)
     for hint in r.get("hints") or []:
-        print(f"hint: {hint}", file=sys.stderr)
+        _print(f"hint: {hint}", file=sys.stderr)
 
 
 def _jitpack_verdict(r: dict) -> str:
@@ -187,11 +204,19 @@ def _jitpack_status(args: argparse.Namespace) -> int:
         if entry.get("error"):
             print(entry["error"], file=sys.stderr)
 
+    if r.get("note"):
+        print(r["note"], file=sys.stderr)
+
     if rc == 2:
         print("JITPACK: PRECONDITION")
     elif r["ok"]:
         print(f"JITPACK: OK {labels[0]} built" if len(entries) == 1
               else f"JITPACK: OK {len(entries)} refs built")
+    elif not r.get("list_ok", True):
+        # The list never answered, so no ref was scored. Inconclusive is its own
+        # word: RED here would read as "this sha needs building".
+        print(f"JITPACK: UNKNOWN {labels[0]} unreachable" if len(entries) == 1
+              else f"JITPACK: UNKNOWN {len(entries)} refs unreachable")
     else:
         bad = next(i for i, e in enumerate(entries) if not e["ok"])
         print(f"JITPACK: RED {labels[bad]} {states[bad]}")
@@ -200,6 +225,10 @@ def _jitpack_status(args: argparse.Namespace) -> int:
 
 def _jitpack_build(args: argparse.Namespace) -> int:
     from . import jitpack
+    if len(args.ref) > 1:
+        # One build is one ref: each distinct ref is a separate jitpack build.
+        print("jitpack build takes at most one --ref", file=sys.stderr)
+        return 2
     timeout = args.timeout if args.timeout is not None else jitpack.BUILD_TIMEOUT
     # The watchdog line is cosmetic and lands while the blocking request is
     # still open - i.e. ahead of every result line below. Keeping it on stderr
@@ -224,6 +253,8 @@ def _jitpack_build(args: argparse.Namespace) -> int:
               f"symbolic={_yn(r.get('symbolic'))}")
     if r.get("precheck"):
         print(f"precheck={r['precheck']} action={r.get('action', 'none')} timeout={timeout:g}s")
+    if r.get("precheck_error"):
+        print(r["precheck_error"], file=sys.stderr)
     if r.get("resolved_version"):
         print(f"resolved={r['resolved_version']} location={r.get('location') or '-'}")
     if r.get("status") != "precondition":
@@ -240,7 +271,7 @@ def _jitpack_build(args: argparse.Namespace) -> int:
     if r.get("log_tail"):
         # Label the tail so it is not read as a summary, as _cmd_verify does.
         print(f"-- build.log tail: {r.get('log_url') or ''} --", file=sys.stderr)
-        print(r["log_tail"])
+        _print(r["log_tail"])
     _jitpack_notes(r)
     print(f"JITPACK: {_jitpack_verdict(r)}")
     return rc
@@ -258,16 +289,19 @@ def _jitpack_pins(args: argparse.Namespace) -> int:
     rows = r["pins"]
     if not rows:
         print(r.get("note", "no jitpack pins found"), file=sys.stderr)
-        print("JITPACK: OK 0 pins")
+        print("JITPACK: OK 0 rows")
         return rc
 
-    headers = ("artifact", "pin", "behind", "jitpack", "consumers")
+    headers = ("artifact", "pin", "behind", "split", "jitpack", "consumers")
     cells = [(row["artifact"], row["pin"] or "-",
               "-" if row["behind"] is None else str(row["behind"]),
+              # Only a real split is worth a number; 1 everywhere would be noise
+              # in the column whose whole job is to make the splits findable.
+              str(row["conflict"]) if row["conflict"] > 1 else "-",
               row["jitpack"], str(row["consumers"])) for row in rows]
     widths = [max(len(headers[i]), *(len(c[i]) for c in cells)) for i in range(len(headers))]
-    # behind and consumers are counts, so they align right under their heading.
-    numeric = (2, 4)
+    # behind, split and consumers are counts, so they align right under their heading.
+    numeric = (2, 3, 5)
 
     def render(values: tuple[str, ...]) -> str:
         return "  ".join(f"{v:>{widths[i]}}" if i in numeric else f"{v:<{widths[i]}}"
@@ -276,9 +310,21 @@ def _jitpack_pins(args: argparse.Namespace) -> int:
     print(render(headers))
     for row in cells:
         print(render(row))
+
+    # "N pins" was ambiguous between the two numbers and named the smaller: the
+    # table has one line per distinct (artifact, pin) row, folded from a larger
+    # number of declaration sites. Both are printed, each with its own word.
     median = "" if r["median_behind"] is None else f" | median behind={r['median_behind']}"
-    print(f"{r['total']} pins | {r['artifacts']} artifacts | {r['stale']} stale | "
-          f"{r['unbuilt']} unbuilt | {r['errors']} error{median}")
+    tail = "".join([f" | {r['unreachable']} unreachable" if r["unreachable"] else "",
+                    f" | {r['unpinned']} unpinned" if r["unpinned"] else ""])
+    print(f"{r['total']} rows | {r['occurrences']} occurrences | {r['artifacts']} artifacts | "
+          f"{r['stale']} stale | {r['unbuilt']} unbuilt | {r['errors']} error | "
+          f"{r['conflicts']} split{tail}{median}")
+    if r["conflicts"]:
+        print(f"split across pins: {', '.join(r['conflicting'])}", file=sys.stderr)
+        print(f"hint: {jitpack._CONFLICT_NOTE}", file=sys.stderr)
+    if r.get("note"):
+        print(r["note"], file=sys.stderr)
 
     if not r["ok"]:
         # Staleness alone is never red - most pins are stale, so a default-red
@@ -287,29 +333,19 @@ def _jitpack_pins(args: argparse.Namespace) -> int:
         reasons = [f"{r['unbuilt']} unbuilt"] if r["unbuilt"] else []
         if r["errors"]:
             reasons.append(f"{r['errors']} error")
+        if r["unreachable"]:
+            reasons.append(f"{r['unreachable']} unreachable")
         if r["over_max_behind"]:
             reasons.append(f"{r['over_max_behind']} over max-behind={r['max_behind']}")
-        print(f"JITPACK: RED {', '.join(reasons) or 'unresolvable pins'}")
+        # Unreachable on its own is inconclusive, not red - nothing was scored.
+        decided = r["unbuilt"] or r["errors"] or r["over_max_behind"]
+        word = "RED" if decided else ("UNKNOWN" if r["unreachable"] else "RED")
+        print(f"JITPACK: {word} {', '.join(reasons) or 'unresolvable pins'}")
     elif r["stale"]:
-        print(f"JITPACK: STALE {r['stale']}/{r['total']}")
+        print(f"JITPACK: STALE {r['stale']}/{r['total']} rows")
     else:
-        print(f"JITPACK: OK {r['total']} pins")
+        print(f"JITPACK: OK {r['total']} rows")
     return rc
-
-
-def _cmd_jitpack(args: argparse.Namespace) -> int:
-    if args.action == "pins":
-        return _jitpack_pins(args)
-    if not args.target:
-        print(f"jitpack {args.action} needs a module (alias, name, or path)", file=sys.stderr)
-        return 2
-    if args.action == "status":
-        return _jitpack_status(args)
-    if len(args.ref) > 1:
-        # One build is one ref: each distinct ref is a separate jitpack build.
-        print("jitpack build takes at most one --ref", file=sys.stderr)
-        return 2
-    return _jitpack_build(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -354,23 +390,50 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.set_defaults(func=_cmd_locate)
 
-    s = sub.add_parser("jitpack", help="JitPack build status, trigger-and-wait, and pin drift")
-    s.add_argument("action", choices=["status", "build", "pins"])
-    s.add_argument("target", nargs="?", default=None,
-                   help="module alias/name/path (status, build); artifact filter (pins)")
-    s.add_argument("--ref", action="append", default=[],
-                   help="git ref or short sha; repeatable for status, at most one for build. "
-                        "Default: origin/<default branch>")
-    s.add_argument("--timeout", type=int, default=None,
-                   help="seconds to wait (default: 900 for build, 20 for status and pins)")
-    s.add_argument("--log-lines", type=int, default=60)
-    s.add_argument("--max-behind", type=int, default=None,
-                   help="pins: fail when a pin is more than N commits behind its default branch")
-    s.add_argument("--force", action="store_true",
-                   help="build: re-request a sha the precheck already reported")
-    s.add_argument("--allow-symbolic", action="store_true",
-                   help="build: permit a <branch>-SNAPSHOT ref instead of a sha")
-    s.set_defaults(func=_cmd_jitpack)
+    # One parser per action rather than one shared flag set: --force and
+    # --allow-symbolic only mean anything to build, and a shared parser accepted
+    # them silently on status and pins, where they did nothing.
+    s = sub.add_parser("jitpack", help="JitPack build status, trigger-and-wait, and pin drift",
+                       description="Ask JitPack about a build, run one, or audit workspace pins.")
+    actions = s.add_subparsers(dest="action", required=True, metavar="{status,build,pins}")
+
+    a = actions.add_parser("status", help="report whether refs are built; triggers nothing",
+                           description="Reads one versionless list endpoint. Never starts a build, "
+                                       "so it is the safe way to ask before pinning.")
+    a.add_argument("target", help="module alias, name, or path")
+    a.add_argument("--ref", action="append", default=[], metavar="REF",
+                   help="git ref or short sha, repeatable (default: origin/<default branch>)")
+    a.add_argument("--timeout", type=int, default=None,
+                   help="seconds before the list read is abandoned (default: 20)")
+    a.set_defaults(func=_jitpack_status)
+
+    a = actions.add_parser("build", help="trigger and wait for ONE real jitpack build",
+                           description="Starts a real build on a third-party service and blocks "
+                                       "until it finishes. One invocation is one build.")
+    a.add_argument("target", help="module alias, name, or path")
+    a.add_argument("--ref", action="append", default=[], metavar="REF",
+                   help="git ref or short sha, at most one (default: origin/<default branch>)")
+    a.add_argument("--timeout", type=int, default=None,
+                   help="seconds to hold the blocking request (default: 900)")
+    a.add_argument("--log-lines", type=int, default=60,
+                   help="trailing build.log lines to print on a failure (default: 60)")
+    a.add_argument("--force", action="store_true",
+                   help="re-request a sha the precheck already reported; cannot clear a "
+                        "cached failure, only a new commit does")
+    a.add_argument("--allow-symbolic", action="store_true",
+                   help="permit a <branch>-SNAPSHOT ref instead of a sha")
+    a.set_defaults(func=_jitpack_build)
+
+    a = actions.add_parser("pins", help="audit every workspace pin for drift and splits",
+                           description="One list read per artifact, read only. Never rewrites a "
+                                       "coordinate and never requests a version.")
+    a.add_argument("target", nargs="?", default=None, metavar="ARTIFACT",
+                   help="case-insensitive artifact filter (default: every pin in the workspace)")
+    a.add_argument("--timeout", type=int, default=None,
+                   help="seconds before a list read is abandoned (default: 20)")
+    a.add_argument("--max-behind", type=int, default=None, metavar="N",
+                   help="fail when a pin is more than N commits behind its default branch")
+    a.set_defaults(func=_jitpack_pins)
 
     return parser
 

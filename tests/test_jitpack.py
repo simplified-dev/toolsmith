@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from toolsmith import discovery, jitpack, modules
+from toolsmith import cli, discovery, jitpack, modules
 from toolsmith.jitpack import exit_code, jitpack_build, jitpack_pins, jitpack_status
 
 MODULE = "discord4j-fauxrig"
@@ -1594,6 +1594,253 @@ def test_pins_with_nothing_to_report_says_so(repo, monkeypatch):
     assert result["total"] == 0
     assert "no jitpack pins found" in result["note"]
     assert http.urls == []
+
+
+# --------------------------------------------------------------------------
+# A read that did not ANSWER against one that answered "no builds". Conflating
+# them is the defect that made this audit untrustworthy: `pins` issues one list
+# call per artifact back to back, jitpack throttles part of the burst, and every
+# pin of a throttled artifact was scored "absent" - i.e. reported as needing a
+# build it did not need. A different handful went red on every run, and the two
+# runs that were compared by hand disagreed about four artifacts.
+# --------------------------------------------------------------------------
+
+def _unpaced(monkeypatch) -> None:
+    """Drops the inter-attempt pause; the retry is under test, not the wait."""
+    monkeypatch.setattr(jitpack, "_LIST_BACKOFF", 0.0)
+
+
+def test_read_records_separates_no_records_from_no_answer(monkeypatch):
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(body=json.dumps({GROUP: {ARTIFACT: {}}})))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    answered = jitpack._read_records(GROUP, ARTIFACT)
+
+    assert answered["answered"] is True
+    assert answered["records"] == {}
+    assert answered["attempts"] == 1
+
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(429, elapsed=0.05))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    unanswered = jitpack._read_records(GROUP, ARTIFACT)
+
+    assert unanswered["answered"] is False
+    assert unanswered["records"] == {}
+    assert unanswered["http_code"] == 429
+    assert "429" in unanswered["error"]
+    assert unanswered["attempts"] == jitpack._LIST_ATTEMPTS
+    assert len(http.urls) == jitpack._LIST_ATTEMPTS
+
+
+def test_read_records_retries_the_one_request_that_triggers_nothing(monkeypatch):
+    """Safe here and nowhere else: every other request in this module is a build."""
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(503, elapsed=0.05),
+               _list_responder({ARTIFACT: {SHA: "ok"}}))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    result = jitpack._read_records(GROUP, ARTIFACT)
+
+    assert result["answered"] is True
+    assert result["records"] == {SHA: "ok"}
+    assert result["attempts"] == 2
+
+
+def test_read_records_never_retries_an_answer(monkeypatch):
+    """A 404 IS an answer - jitpack has never seen the artifact - so it stands."""
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(404, elapsed=0.05))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    result = jitpack._read_records(GROUP, ARTIFACT)
+
+    assert result["answered"] is True
+    assert result["records"] == {}
+    assert len(http.urls) == 1
+
+
+def test_pins_a_throttled_read_is_unreachable_never_unbuilt(tmp_path, monkeypatch):
+    """The original defect, in the shape it shipped in."""
+    _pins_workspace(tmp_path, monkeypatch, libs=("collections",),
+                    consumers={"apps/bot": _pin_line("collections", "c741e14")})
+    _install_git(monkeypatch, _PINS_GIT)
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(429, elapsed=0.05))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    result = jitpack_pins()
+    row = result["pins"][0]
+
+    assert row["state"] == "unreachable"
+    assert row["jitpack"] == "unreachable"
+    assert result["unbuilt"] == 0
+    assert result["unreachable"] == 1
+    # Still inconclusive rather than green - nothing about the pin was learned.
+    assert result["ok"] is False
+    assert "NOT a missing build" in result["note"]
+    # The behind count comes from local git, which the outage never touched.
+    assert row["behind"] == 0
+
+
+def test_pins_an_unpinned_coordinate_is_not_an_unbuilt_one(tmp_path, monkeypatch):
+    """A missing PIN is not a missing BUILD, and there is no version to ask about."""
+    _pins_workspace(tmp_path, monkeypatch, libs=("collections",),
+                    consumers={"apps/bot": f'    api("{GROUP}:collections")\n'})
+    _install_git(monkeypatch, _PINS_GIT)
+    http = _install_http(monkeypatch, by_artifact={"collections": {"c741e14": "ok"}})
+
+    result = jitpack_pins()
+    row = result["pins"][0]
+
+    assert row["form"] == "unpinned"
+    assert row["state"] == "unpinned"
+    assert row["jitpack"] == "n/a (unpinned)"
+    assert row["behind"] is None
+    assert result["unbuilt"] == 0
+    assert result["unpinned"] == 1
+    assert result["ok"] is True
+    # Nothing was asked, because nothing was answerable.
+    assert http.urls == []
+    assert result["list_calls"] == 0
+
+
+def test_pins_reports_what_each_artifact_is_split_across(tmp_path, monkeypatch):
+    """The splits were readable only off adjacent rows, by eye, across 45 of them."""
+    _pins_workspace(tmp_path, monkeypatch, libs=("collections", "utils"), consumers={
+        "apps/bot": _pin_line("collections", "c741e14") + _pin_line("utils", "446877d"),
+        "apps/tool": _pin_line("collections", "2f2aa58") + _snapshot_line("collections"),
+    })
+    _install_git(monkeypatch, _PINS_GIT)
+    _install_http(monkeypatch, by_artifact={
+        "collections": {"c741e14": "ok", "2f2aa58": "ok", "master-abc-1": "ok"},
+        "utils": {"446877d": "ok"}})
+
+    result = jitpack_pins()
+    rows = {(row["artifact"], row["pin"]): row for row in result["pins"]}
+
+    # A SNAPSHOT is a third distinct thing to resolve, so it counts as one.
+    assert rows[("collections", "c741e14")]["conflict"] == 3
+    assert rows[("collections", "master-SNAPSHOT")]["conflict"] == 3
+    assert rows[("utils", "446877d")]["conflict"] == 1
+    assert result["conflicts"] == 1
+    assert result["conflicting"] == ["collections"]
+
+
+def test_pins_counts_rows_and_occurrences_apart(tmp_path, monkeypatch):
+    """"N pins" named the smaller number and read as the larger one."""
+    _pins_workspace(tmp_path, monkeypatch, libs=("collections",), consumers={
+        "apps/bot": _pin_line("collections", "c741e14"),
+        "apps/tool": _pin_line("collections", "c741e14"),
+        "apps/web": _pin_line("collections", "c741e14"),
+    })
+    _install_git(monkeypatch, _PINS_GIT)
+    _install_http(monkeypatch, by_artifact={"collections": {"c741e14": "ok"}})
+
+    result = jitpack_pins()
+
+    assert result["total"] == 1          # one table line
+    assert result["occurrences"] == 3    # three declaration sites
+    assert result["pins"][0]["consumers"] == 3
+
+
+def test_status_an_unanswered_list_is_unreachable_not_absent(repo, monkeypatch):
+    """status is the read people pin from, so a false 'absent' here costs a build."""
+    _install_git(monkeypatch)
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(503, elapsed=0.05))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    result = jitpack_status(MODULE)
+
+    assert result["list_ok"] is False
+    assert result["refs"][0]["state"] == "unreachable"
+    assert result["refs"][0]["ok"] is False
+    assert result["ok"] is False
+    assert "503" in result["note"]
+    # Inconclusive is exit 1. A 2 would claim the caller invoked it wrongly.
+    assert exit_code(result) == 1
+    assert len(http.urls) == jitpack._LIST_ATTEMPTS
+
+
+def test_build_precheck_that_did_not_answer_is_unknown_not_absent(repo, monkeypatch):
+    """The precheck only short-circuits the wait; the artifact GET stays the verdict."""
+    _install_git(monkeypatch)
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(429, elapsed=0.05))
+    http.route(".pom", _response(200, body="<project/>", elapsed=61.0))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    result = jitpack_build(MODULE)
+
+    assert result["precheck"] == "unknown"
+    assert "429" in result["precheck_error"]
+    assert result["action"] == "trigger"
+    assert result["status"] == "built"
+    assert result["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# The CLI's own surface. One parser per action, so a flag that means something
+# to exactly one of them cannot be accepted and ignored on the other two.
+# --------------------------------------------------------------------------
+
+def test_cli_keeps_the_documented_invocation_shape():
+    args = cli.build_parser().parse_args(
+        ["jitpack", "build", "coll", "--ref", SHA, "--force", "--allow-symbolic"])
+
+    assert (args.action, args.target, args.ref) == ("build", "coll", [SHA])
+    assert args.force is True
+    assert args.allow_symbolic is True
+
+
+@pytest.mark.parametrize("argv", [
+    ["jitpack", "status", "coll", "--force"],           # build-only
+    ["jitpack", "status", "coll", "--allow-symbolic"],  # build-only
+    ["jitpack", "status", "coll", "--max-behind", "5"],  # pins-only
+    ["jitpack", "pins", "--ref", SHA],                  # status/build-only
+    ["jitpack", "build", "coll", "--max-behind", "5"],  # pins-only
+    ["jitpack", "status"],                              # target is required
+])
+def test_cli_refuses_a_flag_that_action_does_not_have(argv):
+    """Every one of these was previously accepted and silently ignored."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args(argv)
+
+    assert excinfo.value.code == 2
+
+
+def test_cli_prints_a_log_tail_the_console_cannot_encode():
+    """A cp1252 console raised UnicodeEncodeError and took the build log with it."""
+
+    class _Cp1252Stream(io.StringIO):
+        encoding = "cp1252"
+
+        def write(self, text: str) -> int:
+            text.encode(self.encoding)  # what a real console does
+            return super().write(text)
+
+    stream = _Cp1252Stream()
+
+    cli._print("gradle said ✓ done — with 1 warning", file=stream)
+
+    written = stream.getvalue()
+    assert "gradle said" in written
+    assert "done" in written
+    assert "with 1 warning" in written
+
+
+def test_cli_pins_takes_an_optional_artifact_filter():
+    assert cli.build_parser().parse_args(["jitpack", "pins"]).target is None
+    assert cli.build_parser().parse_args(["jitpack", "pins", "coll"]).target == "coll"
 
 
 # --------------------------------------------------------------------------
