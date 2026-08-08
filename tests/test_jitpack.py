@@ -17,6 +17,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import os
 import re
 import threading
 import time
@@ -227,10 +228,15 @@ def _install_git(monkeypatch, overrides: dict | None = None) -> _FakeGit:
 # --------------------------------------------------------------------------
 
 def _make_module(root: Path, rel: str, *, git: bool = True, build: str = "") -> Path:
-    """Creates a gradle module under root, with its own .git unless told not to."""
+    """Creates a gradle module under root, with its own .git unless told not to.
+
+    newline="" because the default translates every \\n to \\r\\n on Windows, so
+    a build file written here would not hold the bytes it was given - and the
+    rewriting tests below compare bytes.
+    """
     directory = root / rel
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "build.gradle.kts").write_text(build, encoding="utf-8")
+    (directory / "build.gradle.kts").write_text(build, encoding="utf-8", newline="")
     if git:
         (directory / ".git").mkdir(exist_ok=True)
     return directory
@@ -2170,6 +2176,794 @@ def test_the_watchdog_never_breaks_the_wait_it_decorates(monkeypatch):
                       threading.Event(), time.monotonic())
 
     assert lines == []
+
+
+# --------------------------------------------------------------------------
+# Rewriting a pin. The audit above is read-only; the throwaway sed that did the
+# writing had five defects, and each one is a test here:
+#
+#   * it could match nothing, print nothing and exit 0 - so a typo'd artifact
+#     surfaced days later as a build resolving the old sha
+#   * it knew one dialect, and ignored both the app form and a strictly() that
+#     wrapped onto the next line
+#   * it validated nothing, so a sha that was never pushed pinned happily
+#   * it worked out no ordering; the nine-module cascade was derived by hand
+#   * it interpolated the artifact id straight into its own pattern
+# --------------------------------------------------------------------------
+
+# Two pushed, built shas for the library under test, and their 40-char forms.
+# _ORIG_SHA is the pin the captured real build file already carries, so a round
+# trip can be verified in both directions.
+_SET_SHA = "b0b0b0b"
+_SET_FULL = _SET_SHA + "c" * 33
+_ORIG_SHA = "7699a31"
+_ORIG_FULL = _ORIG_SHA + "d" * 33
+
+_DATA = Path(__file__).parent / "data"
+
+
+def _set_git(**overrides) -> dict:
+    """The pins git table plus what _coordinate and _resolve_ref need to verify."""
+    table = {
+        **_PINS_GIT,
+        "remote": "origin",
+        f"rev-parse --verify {_SET_SHA}^{{commit}}": _SET_FULL,
+        f"rev-parse --verify {_SET_FULL}^{{commit}}": _SET_FULL,
+        f"rev-parse --disambiguate={_SET_SHA}": _SET_FULL,
+        f"rev-parse --verify {_ORIG_SHA}^{{commit}}": _ORIG_FULL,
+        f"rev-parse --disambiguate={_ORIG_SHA}": _ORIG_FULL,
+        "branch -r --contains": "origin/master",
+        "rev-parse --abbrev-ref HEAD": "master",
+        "rev-parse --verify": "",
+    }
+    table.update(overrides)
+    return table
+
+
+def _wrapped_line(artifact: str, sha: str) -> str:
+    """The declaration whose strictly() wrapped onto a following line."""
+    return (f'    api("{GROUP}:{artifact}") {{\n'
+            f"        version {{\n"
+            f'            strictly("{sha}")\n'
+            f"        }}\n"
+            f"    }}\n")
+
+
+def _set_workspace(tmp_path, monkeypatch, consumers: dict[str, str],
+                   libs: tuple[str, ...] = ("collections",), records: dict | None = None,
+                   **git) -> Path:
+    """A pins workspace with the git table and list responses a rewrite needs."""
+    root = _pins_workspace(tmp_path, monkeypatch, consumers=consumers, libs=libs)
+    _install_git(monkeypatch, _set_git(**git))
+    _install_http(monkeypatch, by_artifact={"collections": records
+                                            if records is not None else {_SET_SHA: "ok"}})
+    return root
+
+
+def _read(root: Path, rel: str) -> str:
+    return (root / rel).read_text(encoding="utf-8", newline="")
+
+
+# ---- the two dialects, and the third shape one of them arrives in ----------
+
+def test_set_rewrites_both_dialects_and_converts_neither(tmp_path, monkeypatch):
+    """Which form a site uses is a human decision about the ecosystem, not ours."""
+    root = _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": _pin_line("collections", "c741e14"),
+        "apps/tool": _snapshot_line("collections"),
+    })
+
+    result = jitpack.jitpack_set("collections", _SET_SHA, include_snapshots=True)
+
+    assert result["ok"] is True
+    assert result["status"] == "written"
+    assert result["changed"] == 2
+    assert result["unchanged"] == 0
+    assert _read(root, "apps/bot/build.gradle.kts") == _pin_line("collections", _SET_SHA)
+    assert _read(root, "apps/tool/build.gradle.kts") == (
+        f'    api("{GROUP}:collections:{_SET_SHA}")\n')
+    assert sorted(entry["form"] for entry in result["files"]) == ["snapshot", "strictly"]
+    assert exit_code(result) == 0
+
+
+def test_set_rewrites_a_strictly_that_wrapped_onto_a_later_line(tmp_path, monkeypatch):
+    """The shape the sed silently skipped: its pattern needed one line, this is five.
+
+    The pin is on line 3 while the coordinate is on line 1, so an edit anchored
+    to the coordinate's line would rewrite the wrong one - or, having matched
+    nothing, none at all.
+    """
+    root = _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": "dependencies {\n" + _wrapped_line("collections", "c741e14") + "}\n"})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    entry = result["files"][0]
+    assert result["changed"] == 1
+    assert entry["form"] == "strictly"
+    assert entry["line"] == 4        # the strictly(...) itself
+    assert entry["decl_line"] == 2   # the coordinate it belongs to
+    assert entry["before"].strip() == 'strictly("c741e14")'
+    assert entry["after"].strip() == f'strictly("{_SET_SHA}")'
+    assert _read(root, "apps/bot/build.gradle.kts") == (
+        "dependencies {\n" + _wrapped_line("collections", _SET_SHA) + "}\n")
+
+
+def test_set_leaves_every_other_byte_of_the_file_alone(tmp_path, monkeypatch):
+    """A splice at a character span, not a line rewrite: comments and spacing survive."""
+    body = ("dependencies {\n"
+            "    // Simplified Libraries (github.com/simplified-dev)\n"
+            + _pin_line("collections", "c741e14")
+            + _pin_line("utils", "446877d")
+            + "}\n")
+    root = _set_workspace(tmp_path, monkeypatch, consumers={"apps/bot": body})
+
+    jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert _read(root, "apps/bot/build.gradle.kts") == body.replace("c741e14", _SET_SHA)
+
+
+def test_set_preserves_crlf_rather_than_normalising_the_file(tmp_path, monkeypatch):
+    """Universal-newline decoding would shift every span and re-save the file as LF."""
+    _set_workspace(tmp_path, monkeypatch, consumers={"apps/bot": ""})
+    path = tmp_path / "apps/bot/build.gradle.kts"
+    body = ("dependencies {\r\n"
+            + _pin_line("collections", "c741e14").replace("\n", "\r\n")
+            + "}\r\n")
+    path.write_bytes(body.encode())
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["changed"] == 1
+    assert path.read_bytes() == body.replace("c741e14", _SET_SHA).encode()
+    assert b"\r\n" in path.read_bytes()
+
+
+# ---- the failure that cost the most: a rewrite that matched nothing --------
+
+def test_set_refuses_to_match_nothing_quietly(tmp_path, monkeypatch):
+    """A sed with a typo'd artifact exits 0 - and the news arrives as a stale build."""
+    _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": _pin_line("collections", "c741e14") + _pin_line("utils", "446877d")})
+
+    result = jitpack.jitpack_set("collectons", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "no workspace build file pins 'collectons'" in result["error"]
+    assert result["found"] == ["collections", "utils"]
+    assert result["files"] == []
+    assert exit_code(result) == 2
+
+
+def test_set_names_the_near_miss_when_there_is_one(tmp_path, monkeypatch):
+    """The audit filter is a substring; the rewrite is exact, so 'coll' is a typo here."""
+    _set_workspace(tmp_path, monkeypatch,
+                   consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("coll", _SET_SHA)
+
+    assert result["status"] == "precondition"
+    assert result["near"] == ["collections"]
+    assert "did you mean collections?" in result["error"]
+    assert exit_code(result) == 2
+
+
+def test_set_narrowing_to_nothing_is_the_same_error_as_a_typo(tmp_path, monkeypatch):
+    """Otherwise --module turns a real edit into a silent no-op with exit 0."""
+    _set_workspace(tmp_path, monkeypatch, libs=("collections", "utils"), consumers={
+        "apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA, modules=["utils"])
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "none of the requested modules pin 'collections'" in result["error"]
+    assert result["pinned_by"] == ["bot"]
+    assert exit_code(result) == 2
+
+
+def test_set_an_unresolvable_module_token_is_refused(tmp_path, monkeypatch):
+    _set_workspace(tmp_path, monkeypatch,
+                   consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA, modules=["no-such-module"])
+
+    assert result["status"] == "precondition"
+    assert "no-such-module" in result["error"]
+    assert exit_code(result) == 2
+
+
+def test_set_module_filter_narrows_to_the_named_modules(tmp_path, monkeypatch):
+    root = _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": _pin_line("collections", "c741e14"),
+        "apps/tool": _pin_line("collections", "c741e14"),
+    })
+
+    result = jitpack.jitpack_set("collections", _SET_SHA, modules=["bot"])
+
+    assert result["changed"] == 1
+    assert [entry["module"] for entry in result["files"]] == ["bot"]
+    assert _SET_SHA in _read(root, "apps/bot/build.gradle.kts")
+    assert "c741e14" in _read(root, "apps/tool/build.gradle.kts")
+
+
+# ---- an id is compared, never compiled ------------------------------------
+
+def test_set_never_lets_an_artifact_id_widen_what_it_matches(tmp_path, monkeypatch):
+    """The sed interpolated the id into its pattern, so a '.' matched any character.
+
+    Both ids below are legal here - _COORD_RE accepts [\\w.-]+ - and the dot is
+    the metacharacter that really occurs. Matching is ==, and the edit is a
+    splice at a recorded offset, so neither id can reach a pattern at all.
+    """
+    _set_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "apps/bot": _pin_line("gson.extras", "c741e14") + _pin_line("gsonXextras", "2f2aa58")})
+
+    result = jitpack.jitpack_set("gson.extras", _SET_SHA, verify=False)
+
+    assert result["changed"] == 1
+    assert [entry["pin"] for entry in result["files"]] == ["c741e14"]
+    body = _read(tmp_path, "apps/bot/build.gradle.kts")
+    assert _pin_line("gson.extras", _SET_SHA) in body
+    assert _pin_line("gsonXextras", "2f2aa58") in body  # untouched by the dot
+
+
+def test_set_matches_the_whole_id_not_a_substring_of_it(tmp_path, monkeypatch):
+    """`pins text` is a useful filter; `set text` matching minecraft-text is a bug."""
+    _set_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "apps/bot": _pin_line("text", "117775e") + _pin_line("minecraft-text", "2f2aa58")})
+
+    result = jitpack.jitpack_set("text", _SET_SHA, verify=False)
+
+    assert result["changed"] == 1
+    assert [entry["pin"] for entry in result["files"]] == ["117775e"]
+    assert _pin_line("minecraft-text", "2f2aa58") in _read(tmp_path, "apps/bot/build.gradle.kts")
+
+
+# ---- idempotence, and --check ---------------------------------------------
+
+def test_set_is_idempotent_and_does_not_rewrite_a_correct_pin(tmp_path, monkeypatch):
+    """A file with nothing to change is not written at all, so its mtime stands."""
+    root = _set_workspace(tmp_path, monkeypatch,
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+    path = root / "apps/bot/build.gradle.kts"
+
+    first = jitpack.jitpack_set("collections", _SET_SHA)
+    os.utime(path, (1_600_000_000, 1_600_000_000))
+    second = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert (first["changed"], first["status"]) == (1, "written")
+    assert (second["changed"], second["unchanged"]) == (0, 1)
+    assert second["status"] == "unchanged"
+    assert second["ok"] is True
+    assert second["files"][0]["before"] == second["files"][0]["after"]
+    assert path.stat().st_mtime == 1_600_000_000
+    assert exit_code(second) == 0
+
+
+def test_set_check_reports_the_whole_diff_and_writes_nothing(tmp_path, monkeypatch):
+    root = _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": _pin_line("collections", "c741e14"),
+        "apps/tool": _pin_line("collections", "2f2aa58"),
+    })
+    before = {rel: _read(root, rel) for rel in ("apps/bot/build.gradle.kts",
+                                                "apps/tool/build.gradle.kts")}
+
+    result = jitpack.jitpack_set("collections", _SET_SHA, check=True)
+
+    assert result["ok"] is True
+    assert result["status"] == "checked"
+    assert result["check"] is True
+    assert result["changed"] == 2
+    assert [entry["after"].strip() for entry in result["files"]] == [
+        f'api("{GROUP}:collections") {{ version {{ strictly("{_SET_SHA}") }} }}'] * 2
+    assert {rel: _read(root, rel) for rel in before} == before
+    assert exit_code(result) == 0
+
+
+# ---- validation: the half the sed had none of ------------------------------
+
+def test_set_refuses_a_sha_jitpack_has_no_build_for(tmp_path, monkeypatch):
+    """Pinning an unbuilt sha is a resolve failure deferred to whoever builds next."""
+    root = _set_workspace(tmp_path, monkeypatch, records={},
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "unbuilt"
+    assert result["verification"]["state"] == "absent"
+    assert "c741e14" in _read(root, "apps/bot/build.gradle.kts")
+    # The diff is still rendered: what WOULD have changed is the useful part.
+    assert result["changed"] == 1
+    assert exit_code(result) == 1
+
+
+def test_set_refuses_a_sha_that_was_never_pushed(tmp_path, monkeypatch):
+    """Resolvable locally and on no origin branch - the pin nobody else can resolve."""
+    root = _set_workspace(tmp_path, monkeypatch, **{"branch -r --contains": "upstream/master"},
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "is not pushed" in result["error"]
+    assert "c741e14" in _read(root, "apps/bot/build.gradle.kts")
+    assert exit_code(result) == 2
+
+
+def test_set_refuses_a_sha_that_is_not_a_commit_at_all(tmp_path, monkeypatch):
+    root = _set_workspace(tmp_path, monkeypatch,
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", "deadbee")
+
+    assert result["status"] == "precondition"
+    assert "not resolvable" in result["error"]
+    assert "c741e14" in _read(root, "apps/bot/build.gradle.kts")
+    assert exit_code(result) == 2
+
+
+def test_set_will_not_write_when_jitpack_could_not_be_asked(tmp_path, monkeypatch):
+    """Inconclusive is not permission; it is also not the red 'unbuilt' verdict."""
+    _pins_workspace(tmp_path, monkeypatch, libs=("collections",),
+                    consumers={"apps/bot": _pin_line("collections", "c741e14")})
+    _install_git(monkeypatch, _set_git())
+    _unpaced(monkeypatch)
+    http = _FakeHttp()
+    http.route("/api/builds/", _response(429, elapsed=0.05))
+    monkeypatch.setattr(jitpack, "_http", http)
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "unverified"
+    assert result["verification"]["state"] == "unreachable"
+    assert "--no-verify" in result["note"]
+    assert "c741e14" in _read(tmp_path, "apps/bot/build.gradle.kts")
+    assert exit_code(result) == 1
+
+
+def test_set_verification_reads_only_the_versionless_list(tmp_path, monkeypatch):
+    """It is a precheck, so it may not trigger the build it is asking about."""
+    _set_workspace(tmp_path, monkeypatch,
+                   consumers={"apps/bot": _pin_line("collections", "c741e14")})
+    http = jitpack._http
+
+    jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert http.urls == [f"https://jitpack.io/api/builds/{GROUP}/collections"]
+    assert all(_LIST_URL_RE.fullmatch(url) for url in http.urls)
+
+
+def test_set_no_verify_asks_nothing_at_all(tmp_path, monkeypatch):
+    root = _set_workspace(tmp_path, monkeypatch, records={},
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+    http = jitpack._http
+
+    result = jitpack.jitpack_set("collections", _SET_SHA, verify=False)
+
+    assert result["ok"] is True
+    assert result["verification"] is None
+    assert http.urls == []
+    assert _SET_SHA in _read(root, "apps/bot/build.gradle.kts")
+
+
+def test_set_cannot_verify_an_artifact_this_workspace_does_not_publish(tmp_path, monkeypatch):
+    """A third-party coordinate has no local repo to resolve the sha against."""
+    _set_workspace(tmp_path, monkeypatch, libs=(),
+                   consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "no repo in this workspace publishes 'collections'" in result["error"]
+    assert "--no-verify" in result["error"]
+    assert exit_code(result) == 2
+
+
+# ---- what is deliberately NOT rewritten -----------------------------------
+
+def test_set_leaves_a_snapshot_coordinate_floating_by_default(tmp_path, monkeypatch):
+    """It resolves the new commit by itself; nailing it down is a semantic change."""
+    root = _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": _pin_line("collections", "c741e14"),
+        "apps/tool": _snapshot_line("collections"),
+    })
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["changed"] == 1
+    assert result["skipped"] == 1
+    assert result["skipped_sites"][0]["form"] == "snapshot"
+    assert "--include-snapshots" in result["skipped_sites"][0]["reason"]
+    assert _read(root, "apps/tool/build.gradle.kts") == _snapshot_line("collections")
+
+
+def test_set_matching_only_snapshots_is_not_a_silent_success(tmp_path, monkeypatch):
+    """Zero edits with exit 0 is exactly the outcome this command exists to remove."""
+    _set_workspace(tmp_path, monkeypatch,
+                   consumers={"apps/bot": _snapshot_line("collections")})
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "none of them rewritable" in result["error"]
+    assert exit_code(result) == 2
+
+
+def test_set_reports_an_unpinned_coordinate_rather_than_inventing_a_version(tmp_path, monkeypatch):
+    """There is no pin text to replace; adding one would change the declaration's shape."""
+    root = _set_workspace(tmp_path, monkeypatch, consumers={
+        "apps/bot": _pin_line("collections", "c741e14"),
+        "apps/tool": f'    api("{GROUP}:collections")\n',
+    })
+
+    result = jitpack.jitpack_set("collections", _SET_SHA)
+
+    assert result["changed"] == 1
+    assert result["skipped"] == 1
+    assert result["skipped_sites"][0]["form"] == "unpinned"
+    assert "no version to replace" in result["skipped_sites"][0]["reason"]
+    assert _read(root, "apps/tool/build.gradle.kts") == f'    api("{GROUP}:collections")\n'
+
+
+def test_set_refuses_a_maven_central_artifact(tmp_path, monkeypatch):
+    """annotations carries a released version there; a commit sha is not one."""
+    _set_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "apps/bot": f'    implementation("io.github.{ORG}:annotations:2.5.0")\n'})
+
+    result = jitpack.jitpack_set("annotations", _SET_SHA)
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "publishes to maven central" in result["error"]
+    assert exit_code(result) == 2
+
+
+def test_set_refuses_an_id_pinned_under_two_groups_until_it_is_qualified(tmp_path, monkeypatch):
+    """Guessing which org's artifact was meant is how the wrong one gets rewritten."""
+    other = "com.github.minecraft-library"
+    root = _set_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "apps/bot": _pin_line("text", "117775e")
+                    + f'    api("{other}:text") {{ version {{ strictly("2f2aa58") }} }}\n'})
+
+    ambiguous = jitpack.jitpack_set("text", _SET_SHA, verify=False)
+
+    assert ambiguous["ok"] is False
+    assert ambiguous["status"] == "precondition"
+    assert ambiguous["groups"] == [other, GROUP]
+    assert f"{other}:text" in ambiguous["error"]
+    assert exit_code(ambiguous) == 2
+
+    qualified = jitpack.jitpack_set(f"{other}:text", _SET_SHA, verify=False)
+
+    assert qualified["changed"] == 1
+    body = _read(root, "apps/bot/build.gradle.kts")
+    assert f'"{other}:text") {{ version {{ strictly("{_SET_SHA}")' in body
+    assert _pin_line("text", "117775e") in body  # the other group is untouched
+
+
+# ---- the sha itself --------------------------------------------------------
+
+def test_set_cuts_any_hex_sha_to_the_same_seven_everything_else_uses(tmp_path, monkeypatch):
+    """Each distinct prefix length is a SEPARATE jitpack build.
+
+    8 chars is the one that bites rather than 40: it looks like a sha, and
+    _resolve_ref reports on its 7-char form - so verifying it and then writing
+    it unchanged would check one version and pin another.
+    """
+    root = _set_workspace(tmp_path, monkeypatch,
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", _SET_FULL.upper())
+
+    assert result["sha"] == _SET_SHA
+    assert len(result["sha"]) == 7
+    assert "cut to 7 chars" in result["note"]
+    assert _read(root, "apps/bot/build.gradle.kts") == _pin_line("collections", _SET_SHA)
+
+    over_long = jitpack.jitpack_set("collections", _SET_FULL[:8], verify=False)
+
+    assert over_long["sha"] == _SET_SHA
+    assert "cut to 7 chars" in over_long["note"]
+
+
+def test_set_writes_the_sha_verification_resolved_not_the_spelling_it_was_given(
+        tmp_path, monkeypatch):
+    """What was checked is what gets written, which is also what makes a ref usable.
+
+    _resolve_ref answers about the 7-char form of whatever it is handed, so the
+    pin has to come back from the verification rather than from the argument.
+    """
+    root = _set_workspace(tmp_path, monkeypatch,
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")},
+                          **{"rev-parse --verify origin/master^{commit}": _SET_FULL})
+
+    result = jitpack.jitpack_set("collections", "origin/master")
+
+    assert result["sha"] == _SET_SHA
+    assert result["verification"]["ref"] == _SET_SHA
+    assert "'origin/master' resolved to 'b0b0b0b'" in result["note"]
+    assert _read(root, "apps/bot/build.gradle.kts") == _pin_line("collections", _SET_SHA)
+
+
+@pytest.mark.parametrize("sha", ["../../api/builds/com.github.o/a/x", "a/b", "", "-lead", "a b"])
+def test_set_refuses_a_pin_that_is_not_a_usable_version(tmp_path, monkeypatch, sha):
+    """A pin becomes a url path segment downstream, so the charset is enforced here too."""
+    root = _set_workspace(tmp_path, monkeypatch,
+                          consumers={"apps/bot": _pin_line("collections", "c741e14")})
+
+    result = jitpack.jitpack_set("collections", sha)
+
+    assert result["status"] == "precondition"
+    assert "not a usable version" in result["error"]
+    assert "c741e14" in _read(root, "apps/bot/build.gradle.kts")
+    assert exit_code(result) == 2
+
+
+# ---- the file underneath ---------------------------------------------------
+
+def test_rewrite_refuses_to_splice_a_file_that_moved_under_the_scan(tmp_path):
+    """A splice at a stale offset corrupts a coordinate rather than failing."""
+    path = tmp_path / "build.gradle.kts"
+    path.write_text(_pin_line("collections", "c741e14"), encoding="utf-8")
+    stale = {"file": "build.gradle.kts", "line": 1, "module": "bot", "form": "strictly",
+             "pin": "c741e14", "span": (0, 7)}
+
+    entries, error = jitpack._rewrite_file(path, [stale], _SET_SHA, write=True)
+
+    assert entries == []
+    assert "changed between the scan and the write" in error
+    assert path.read_text(encoding="utf-8") == _pin_line("collections", "c741e14")
+
+
+def test_set_round_trips_a_real_build_file_byte_for_byte(tmp_path, monkeypatch):
+    """A verbatim copy of Simplified-Api/hypixel/build.gradle.kts, not a fixture.
+
+    Seven pins across three orgs, a comment block between each group, and a
+    trailing newline: anything that rewrote by line, re-joined the file, or
+    normalised its ending would show up as a byte diff after the round trip.
+    """
+    original = (_DATA / "real-hypixel.build.gradle.kts").read_text(encoding="utf-8", newline="")
+    root = _pins_workspace(tmp_path, monkeypatch, libs=("collections",),
+                           consumers={"api/hypixel": original})
+    _install_git(monkeypatch, _set_git())
+    _install_http(monkeypatch, by_artifact={"collections": {_SET_SHA: "ok",
+                                                            _ORIG_SHA: "ok"}})
+    path = root / "api/hypixel/build.gradle.kts"
+
+    forward = jitpack.jitpack_set("collections", _SET_SHA)
+    edited = path.read_text(encoding="utf-8", newline="")
+    back = jitpack.jitpack_set("collections", _ORIG_SHA)
+
+    # One of the seven pins moves; the other six, three orgs and every comment
+    # and blank line are byte-identical, and the file returns to itself.
+    assert (forward["changed"], forward["status"]) == (1, "written")
+    assert forward["files"][0]["line"] == 41
+    assert edited == original.replace(f'strictly("{_ORIG_SHA}")', f'strictly("{_SET_SHA}")')
+    assert edited != original
+    assert (back["changed"], back["status"]) == (1, "written")
+    assert path.read_text(encoding="utf-8", newline="") == original
+
+
+# --------------------------------------------------------------------------
+# The cascade. Deriving it by hand meant reading ten build files and holding
+# the graph in your head; the value here is that it is mechanical. What it may
+# NOT do is overstate itself: published module metadata records
+# {"requires": "<sha>"}, so an inherited pin is soft and a consumer's own
+# strictly() overrides it. Nothing in gradle forces the far end of a chain.
+# --------------------------------------------------------------------------
+
+def _cascade_workspace(tmp_path, monkeypatch) -> Path:
+    """The real shape in miniature: a diamond ending in one consumer."""
+    root = _pins_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "libs/collections": "",
+        "libs/utils": _pin_line("collections", "c741e14"),
+        "libs/scheduler": _pin_line("collections", "c741e14"),
+        "libs/reflection": _pin_line("collections", "c741e14") + _pin_line("utils", "446877d"),
+        "libs/persistence": _pin_line("reflection", "33b2f05") + _pin_line("scheduler", "754319e"),
+        "apps/bot": _snapshot_line("persistence"),
+    })
+    _install_git(monkeypatch, _PINS_GIT)
+    return root
+
+
+def test_order_derives_the_cascade_in_dependency_order(tmp_path, monkeypatch):
+    _cascade_workspace(tmp_path, monkeypatch)
+
+    result = jitpack.jitpack_order("collections")
+
+    assert result["ok"] is True
+    # Source first, then everything at depth N once depth N-1 is built.
+    assert result["chain"] == ["collections", "scheduler", "utils",
+                               "reflection", "persistence"]
+    assert [row["depth"] for row in result["order"]] == [0, 1, 1, 2, 3]
+    assert result["total"] == 4
+    assert exit_code(result) == 0
+
+
+def test_order_separates_a_pin_that_must_move_from_one_that_moves_by_convention(
+        tmp_path, monkeypatch):
+    """strictly is not transitive here, so the far end is convention, not gradle."""
+    _cascade_workspace(tmp_path, monkeypatch)
+
+    result = jitpack.jitpack_order("collections")
+    rows = {row["artifact"]: row for row in result["order"]}
+
+    assert rows["collections"]["reason"] == "source"
+    # utils and reflection declare collections themselves: their own strictly()
+    # is the binding constraint, so a stale one keeps them on the OLD code.
+    assert rows["utils"]["reason"] == "direct"
+    assert rows["reflection"]["reason"] == "direct"
+    # persistence never names collections. It reaches it only through reflection
+    # and scheduler, where the constraint is published as a soft "requires".
+    assert rows["persistence"]["reason"] == "cascade"
+    assert [p["artifact"] for p in rows["persistence"]["repins"]] == ["reflection", "scheduler"]
+    assert (result["direct"], result["cascade"]) == (3, 1)
+    assert "not a resolution requirement" in result["note"]
+
+
+def test_order_names_the_exact_declaration_sites_to_edit(tmp_path, monkeypatch):
+    _cascade_workspace(tmp_path, monkeypatch)
+
+    rows = {row["artifact"]: row for row in jitpack.jitpack_order("collections")["order"]}
+
+    assert rows["reflection"]["repins"] == [
+        {"artifact": "collections", "pin": "c741e14", "form": "strictly",
+         "file": "libs/reflection/build.gradle.kts", "line": 1},
+        {"artifact": "utils", "pin": "446877d", "form": "strictly",
+         "file": "libs/reflection/build.gradle.kts", "line": 2},
+    ]
+    assert rows["collections"]["repins"] == []  # the source is built, not edited
+
+
+def test_order_leaves_a_snapshot_consumer_floating_instead_of_ordering_it(
+        tmp_path, monkeypatch):
+    """It resolves the new commit with no edit, so it earns no commit of its own.
+
+    Propagating through it would invent work for everything downstream of a
+    module that never has to change.
+    """
+    _cascade_workspace(tmp_path, monkeypatch)
+
+    result = jitpack.jitpack_order("collections")
+
+    assert result["floating"] == ["bot"]
+    assert "bot" not in result["chain"]
+
+
+def test_order_maps_an_artifact_back_to_the_module_that_publishes_it(tmp_path, monkeypatch):
+    """The artifact id is the remote's repo segment and need not be the module name.
+
+    The minecraft-text module publishes github.com/minecraft-library/text, so a
+    graph keyed on directory names would never join the pin to its producer.
+    """
+    _pins_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "libs/minecraft-text": "",
+        "apps/bot": '    api("com.github.minecraft-library:text")'
+                    ' { version { strictly("117775e") } }\n'})
+    _install_git(monkeypatch, {**_PINS_GIT, "config --get remote.origin.url":
+                               lambda d: ("https://github.com/minecraft-library/text.git"
+                                          if d.name == "minecraft-text"
+                                          else f"https://github.com/{ORG}/{d.name}.git")})
+
+    result = jitpack.jitpack_order("text")
+
+    assert result["order"][0]["artifact"] == "text"
+    assert result["order"][0]["modules"] == ["minecraft-text"]
+    assert result["chain"] == ["text", "bot"]
+    assert result["order"][1]["repins"][0]["pin"] == "117775e"
+
+
+def test_order_on_an_unknown_artifact_is_a_precondition(tmp_path, monkeypatch):
+    _cascade_workspace(tmp_path, monkeypatch)
+
+    result = jitpack.jitpack_order("collectons")
+
+    assert result["ok"] is False
+    assert result["status"] == "precondition"
+    assert "neither published nor pinned" in result["error"]
+    assert "collections" in result["known"]
+    assert exit_code(result) == 2
+
+
+def test_order_on_a_leaf_says_so_rather_than_returning_an_empty_success(
+        tmp_path, monkeypatch):
+    _cascade_workspace(tmp_path, monkeypatch)
+
+    result = jitpack.jitpack_order("persistence")
+
+    assert result["ok"] is True
+    assert result["total"] == 0
+    assert result["chain"] == ["persistence"]
+    assert "nothing in this workspace pins 'persistence'" in result["note"]
+
+
+def test_order_reports_a_pin_cycle_instead_of_looping_on_it(tmp_path, monkeypatch):
+    """Two modules pinning each other has no valid order, and is worth going to fix."""
+    _pins_workspace(tmp_path, monkeypatch, libs=(), consumers={
+        "libs/collections": _pin_line("utils", "446877d"),
+        "libs/utils": _pin_line("collections", "c741e14"),
+    })
+    _install_git(monkeypatch, _PINS_GIT)
+
+    result = jitpack.jitpack_order("collections")
+
+    assert result["cycles"] == ["collections", "utils"]
+    assert all(row["cyclic"] for row in result["order"])
+    assert sorted(result["chain"]) == ["collections", "utils"]
+
+
+def test_order_never_asks_jitpack_anything(tmp_path, monkeypatch):
+    """It is a graph walk over local files; a build list would tell it nothing."""
+    _cascade_workspace(tmp_path, monkeypatch)
+    http = _install_http(monkeypatch)
+
+    assert jitpack.jitpack_order("collections")["total"] == 4
+    assert http.urls == []
+
+
+def test_order_without_an_inventory_is_a_precondition(monkeypatch):
+    monkeypatch.setattr(jitpack, "workspace_root", lambda: None)
+
+    result = jitpack.jitpack_order("collections")
+
+    assert result["ok"] is False
+    assert "no inventory" in result["error"]
+    assert exit_code(result) == 2
+
+
+# --------------------------------------------------------------------------
+# The CLI and exit codes for both new actions.
+# --------------------------------------------------------------------------
+
+def test_cli_set_keeps_the_documented_invocation_shape():
+    args = cli.build_parser().parse_args(
+        ["jitpack", "set", "collections", SHA, "--module", "utils", "--module", "client",
+         "--check", "--no-verify", "--include-snapshots"])
+
+    assert (args.action, args.artifact, args.sha) == ("set", "collections", SHA)
+    assert args.module == ["utils", "client"]
+    assert (args.check, args.no_verify, args.include_snapshots) == (True, True, True)
+
+
+def test_cli_order_takes_one_artifact():
+    args = cli.build_parser().parse_args(["jitpack", "order", "collections"])
+
+    assert (args.action, args.artifact) == ("order", "collections")
+
+
+@pytest.mark.parametrize("argv", [
+    ["jitpack", "set", "collections"],                      # the sha is required
+    ["jitpack", "set", "collections", SHA, "--force"],      # build-only
+    ["jitpack", "set", "collections", SHA, "--max-behind", "5"],  # pins-only
+    ["jitpack", "order"],                                   # the artifact is required
+    ["jitpack", "order", "collections", "--check"],         # set-only
+    ["jitpack", "order", "collections", "--module", "utils"],  # set-only
+    ["jitpack", "pins", "--include-snapshots"],             # set-only
+    ["jitpack", "status", "coll", "--no-verify"],           # set-only
+])
+def test_cli_refuses_a_flag_the_new_actions_do_not_have(argv):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args(argv)
+
+    assert excinfo.value.code == 2
+
+
+def test_exit_code_covers_the_set_and_order_statuses():
+    assert exit_code({"ok": True, "status": "written"}) == 0
+    assert exit_code({"ok": True, "status": "checked"}) == 0
+    assert exit_code({"ok": True, "status": "unchanged"}) == 0
+    # Red, not a usage error: the command was invoked correctly and jitpack said no.
+    assert exit_code({"ok": False, "status": "unbuilt", "error": "absent"}) == 1
+    assert exit_code({"ok": False, "status": "unverified", "error": "429"}) == 1
+    assert exit_code({"ok": False, "status": "write-failed", "error": "readonly"}) == 1
+    assert exit_code({"ok": False, "status": "precondition", "error": "no match"}) == 2
 
 
 # --------------------------------------------------------------------------

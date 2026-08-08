@@ -348,6 +348,118 @@ def _jitpack_pins(args: argparse.Namespace) -> int:
     return rc
 
 
+# One verdict word per jitpack set status, for the same reason build has one:
+# "written" and "unchanged" are both exit 0 but are not the same outcome, and
+# "unbuilt" and "unverified" are both exit 1 while meaning opposite things.
+_SET_VERDICTS = {
+    "written": "SET",
+    "checked": "CHECK",
+    "unchanged": "OK",
+    "unbuilt": "RED",
+    "unverified": "UNKNOWN",
+    "write-failed": "FAILED",
+    "precondition": "PRECONDITION",
+}
+
+
+def _jitpack_set(args: argparse.Namespace) -> int:
+    from . import jitpack
+    timeout = args.timeout if args.timeout is not None else jitpack.LIST_TIMEOUT
+    r = jitpack.jitpack_set(args.artifact, args.sha, modules=args.module, check=args.check,
+                            verify=not args.no_verify,
+                            include_snapshots=args.include_snapshots, timeout=timeout)
+    rc = jitpack.exit_code(r)
+    status = r.get("status", "precondition")
+
+    if status == "precondition":
+        print(r["error"], file=sys.stderr)
+        # The ids that DO exist, so a typo is answered in the same breath rather
+        # than by a second command.
+        if r.get("near"):
+            print(f"closest: {', '.join(r['near'])}", file=sys.stderr)
+        elif r.get("found"):
+            print(f"pinned artifacts: {', '.join(r['found'])}", file=sys.stderr)
+        for site in r.get("skipped_sites", []):
+            print(f"skip {site['file']}:{site['line']}  {site['reason']}", file=sys.stderr)
+        print("JITPACK: PRECONDITION")
+        return rc
+
+    print(f"artifact={r['artifact']} group={r.get('group', '-')} sha={r['sha']}")
+    verification = r.get("verification")
+    if verification is not None:
+        print(f"verify={verification['state']} repo={verification.get('repo') or '-'} "
+              f"list={_yn(verification.get('list_ok'))}")
+    else:
+        print("verify=skipped (--no-verify)", file=sys.stderr)
+
+    if r["files"]:
+        # "->" and "==" rather than a diff: one line per site is the whole
+        # change, and the arrow is what separates a rewrite from a no-op.
+        cells = [(f"{e['file']}:{e['line']}", e["pin"] or "-",
+                  "->" if e["changed"] else "==", r["sha"], e["form"]) for e in r["files"]]
+        widths = [max(len(c[i]) for c in cells) for i in range(4)]
+        for site, before, arrow, after, form in cells:
+            suffix = "" if form == "strictly" else f"  ({form})"
+            print(f"{site:<{widths[0]}}  {before:>{widths[1]}} {arrow} "
+                  f"{after:<{widths[2]}}{suffix}".rstrip())
+    for site in r.get("skipped_sites", []):
+        print(f"skip {site['file']}:{site['line']}  {site['reason']}", file=sys.stderr)
+
+    verb = "would change" if r["check"] else "changed"
+    print(f"{r['changed']} {verb} | {r['unchanged']} unchanged | {r['skipped']} skipped | "
+          f"{r['files_touched']} file(s)")
+    if r.get("note"):
+        print(f"note: {r['note']}", file=sys.stderr)
+    if r.get("error"):
+        print(r["error"], file=sys.stderr)
+    word = _SET_VERDICTS.get(status, "FAILED")
+    print(f"JITPACK: {word} {r['artifact']} {r['changed']}/{len(r['files'])} at {r['sha']}")
+    return rc
+
+
+def _jitpack_order(args: argparse.Namespace) -> int:
+    from . import jitpack
+    r = jitpack.jitpack_order(args.artifact)
+    rc = jitpack.exit_code(r)
+    if r.get("status") == "precondition":
+        print(r["error"], file=sys.stderr)
+        print("JITPACK: PRECONDITION")
+        return rc
+
+    # The arrow chain first: it is the shape this list was previously derived
+    # in by hand, and it is the one line worth copying into a plan.
+    print(" -> ".join(r["chain"]))
+    headers = ("#", "depth", "artifact", "reason", "re-pin")
+    cells = []
+    for index, row in enumerate(r["order"], start=1):
+        repins = [f"{p['artifact']}@{p['pin'] or '-'}" for p in row["repins"]]
+        shown = ", ".join(repins[:3]) + (f" +{len(repins) - 3} more" if len(repins) > 3 else "")
+        cells.append((str(index), str(row["depth"]), row["artifact"],
+                      row["reason"], shown or "-"))
+    widths = [max(len(headers[i]), *(len(c[i]) for c in cells)) for i in range(len(headers))]
+    numeric = (0, 1)
+
+    def render(values: tuple[str, ...]) -> str:
+        return "  ".join(f"{v:>{widths[i]}}" if i in numeric else f"{v:<{widths[i]}}"
+                         for i, v in enumerate(values)).rstrip()
+
+    print(render(headers))
+    for row in cells:
+        print(render(row))
+
+    print(f"{r['total']} to re-pin | {r['direct']} direct | {r['cascade']} cascade"
+          + (f" | {len(r['floating'])} floating" if r["floating"] else "")
+          + (f" | {len(r['cycles'])} in a cycle" if r["cycles"] else ""))
+    if r["floating"]:
+        print(f"floating (-SNAPSHOT, no edit needed): {', '.join(r['floating'])}",
+              file=sys.stderr)
+    if r["cycles"]:
+        print(f"pin cycle - no valid order for: {', '.join(r['cycles'])}", file=sys.stderr)
+    print(f"note: {r['note']}", file=sys.stderr)
+    print(f"JITPACK: ORDER {r['total']} module(s) after {r['artifact']}")
+    return rc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="toolsmith",
                                      description="Java workspace dev tools + MCP server.")
@@ -394,8 +506,10 @@ def build_parser() -> argparse.ArgumentParser:
     # --allow-symbolic only mean anything to build, and a shared parser accepted
     # them silently on status and pins, where they did nothing.
     s = sub.add_parser("jitpack", help="JitPack build status, trigger-and-wait, and pin drift",
-                       description="Ask JitPack about a build, run one, or audit workspace pins.")
-    actions = s.add_subparsers(dest="action", required=True, metavar="{status,build,pins}")
+                       description="Ask JitPack about a build, run one, or read and rewrite "
+                                   "workspace pins.")
+    actions = s.add_subparsers(dest="action", required=True,
+                               metavar="{status,build,pins,set,order}")
 
     a = actions.add_parser("status", help="report whether refs are built; triggers nothing",
                            description="Reads one versionless list endpoint. Never starts a build, "
@@ -434,6 +548,36 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--max-behind", type=int, default=None, metavar="N",
                    help="fail when a pin is more than N commits behind its default branch")
     a.set_defaults(func=_jitpack_pins)
+
+    a = actions.add_parser("set", help="rewrite an artifact's pin across the workspace",
+                           description="The write counterpart of pins. Matches the artifact id "
+                                       "EXACTLY, preserves each site's dialect, and errors "
+                                       "rather than matching nothing quietly.")
+    a.add_argument("artifact", help="artifact id, or <group>:<artifact> when one id is "
+                                    "pinned under two groups")
+    a.add_argument("sha", help="the sha to pin, cut to 7 chars; with verification on this "
+                               "may be any ref git resolves, and the sha it resolves to is "
+                               "what gets written")
+    a.add_argument("--module", action="append", default=[], metavar="M",
+                   help="narrow to this module, repeatable (default: every module that "
+                        "pins the artifact)")
+    a.add_argument("--check", action="store_true",
+                   help="report what would change and write nothing")
+    a.add_argument("--no-verify", action="store_true",
+                   help="skip the jitpack check that the sha is pushed and built")
+    a.add_argument("--include-snapshots", action="store_true",
+                   help="also nail <branch>-SNAPSHOT coordinates to the sha; they float "
+                        "onto the new commit by themselves otherwise")
+    a.add_argument("--timeout", type=int, default=None,
+                   help="seconds before the verification list read is abandoned (default: 20)")
+    a.set_defaults(func=_jitpack_set)
+
+    a = actions.add_parser("order", help="what has to be re-pinned after an artifact changes",
+                           description="Walks the workspace pin graph. Read only, no network, "
+                                       "and it distinguishes a pin that must move from one "
+                                       "that moves by convention.")
+    a.add_argument("artifact", help="the artifact whose sha is changing")
+    a.set_defaults(func=_jitpack_order)
 
     return parser
 

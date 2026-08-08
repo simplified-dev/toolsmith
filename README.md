@@ -69,6 +69,8 @@ Run `/mcp` to confirm the `toolsmith` server loaded. (Standalone alternative: sk
 | `javadoc_normalize` | Audit or `--fix` javadocs against the project conventions. |
 | `jitpack_status` | Is a module's commit built on JitPack? One read of the versionless build list - **never** triggers a build. |
 | `jitpack_build` | Precheck, then trigger and wait for **one** build of a sha. Returns the verdict, the ready-to-paste `strictly(...)` pin, and the failing `build.log` tail. |
+| `jitpack_set` | Rewrite one artifact's pin across every build file that declares it. Exact match, both dialects, sha verified before writing, idempotent - and zero matches is an **error**, not a silent no-op. |
+| `jitpack_order` | What has to be re-pinned after an artifact's sha changes, in dependency order. Offline graph walk; separates a pin that must move from one that moves by convention. |
 
 ## Bundled skills
 
@@ -96,8 +98,27 @@ toolsmith locate TypeRegistrar  # find a class file across module sources
 toolsmith jitpack status d4j    # are the module's commits built on JitPack (read-only)
 toolsmith jitpack build d4j     # trigger + wait for one build; prints the strictly(<sha>) pin
 toolsmith jitpack pins          # workspace pin-drift table (commits behind / unbuilt / stale)
+toolsmith jitpack order coll    # what to re-pin after collections changes, in order
+toolsmith jitpack set coll SHA  # rewrite that pin everywhere (--check, --module, --no-verify)
 toolsmith serve                 # run the stdio MCP server (what the plugin launches)
 ```
+
+## Re-pinning a cascade
+
+`pins` reads, `order` plans, `set` writes. A multi-module re-pin is the three in sequence:
+
+```bash
+toolsmith jitpack order collections     # -> collections -> utils -> reflection -> ...
+# then, one module at a time, in that order:
+toolsmith jitpack set collections <sha> --module utils
+toolsmith verify utils                  # gate the edit locally
+git -C ../utils commit -am "..."        # then push
+toolsmith jitpack build utils           # -> the new sha for the next step
+```
+
+`set` matches the artifact id **exactly** (`pins` filters by substring; a rewrite that over-matches edits the wrong artifact), handles both the `strictly(...)` and `group:artifact:version` forms plus a `strictly` that wrapped onto a later line, and preserves whichever a site already used. It refuses to write unless the sha resolves in the publishing repo's git, is pushed, and has a green JitPack build - `--no-verify` opts out. `--check` reports the diff and writes nothing. `-SNAPSHOT` coordinates are left floating unless `--include-snapshots`.
+
+`order` is offline. It marks a module **direct** when it declares the changed artifact itself - its own `strictly()` binds, so a stale one keeps it on the old code - and **cascade** when it only pins things that get a new sha as a result. The difference matters because published module metadata records `{"requires": "<sha>"}`, not `strictly`: an inherited pin is a *soft* constraint that a consumer's own `strictly()` overrides, so a full cascade is this workspace's one-sha-per-artifact convention rather than something Gradle demands.
 
 ## How discovery works
 
