@@ -21,11 +21,19 @@ from . import tally as tally_mod
 def _cmd_setup(args: argparse.Namespace) -> int:
     root, mods = discovery.run_setup(args.root)
     buildable = sum(1 for m in mods if m["buildable"])
+    repos = sum(1 for m in mods if m["repo"])
+    tally = ", ".join(f"{sum(1 for m in mods if m['kind'] == kind)} {kind}"
+                      for kind in ("gradle", "maven", "python")
+                      if any(m["kind"] == kind for m in mods))
     print(f"toolsmith: scanned {root}")
-    print(f"  {len(mods)} gradle module(s), {buildable} buildable")
+    print(f"  {len(mods)} project(s) - {tally or 'no build system'}; "
+          f"{buildable} buildable, {repos} git repo(s)")
     width = max((len(m["shorthand"]) for m in mods), default=2)
+    kind_width = max((len(m["kind"] or "-") for m in mods), default=6)
     for m in mods:
-        print(f"  {m['shorthand']:<{width}}  {m['path']:<44}  {m['package'] or '-'}")
+        marker = "git" if m["repo"] else "   "
+        print(f"  {m['shorthand']:<{width}}  {(m['kind'] or '-'):<{kind_width}}  {marker}  "
+              f"{m['path']:<44}  {m['package'] or '-'}")
     print(f"cache: {root}/.toolsmith/modules.json")
     return 0
 
@@ -36,8 +44,10 @@ def _cmd_modules(args: argparse.Namespace) -> int:
         print("no inventory - run `toolsmith setup [ROOT]` first", file=sys.stderr)
         return 2
     width = max((len(m["shorthand"]) for m in mods), default=2)
+    kind_width = max((len(m["kind"] or "-") for m in mods), default=6)
     for m in mods:
-        print(f"{m['shorthand']:<{width}}  {m['name']:<26}  {m['package'] or '-'}")
+        print(f"{m['shorthand']:<{width}}  {(m['kind'] or '-'):<{kind_width}}  "
+              f"{m['name']:<26}  {m['package'] or '-'}")
     return 0
 
 

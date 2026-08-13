@@ -67,7 +67,7 @@ A prefix names **who can use** the tool: `gradle_*` needs a gradle build, `java_
 
 | Tool | What it does |
 |------|--------------|
-| `gradle_modules` | The discovered inventory: each module's name, path, **base package**, short alias. Look packages up instead of guessing - several roots are counter-intuitive. |
+| `gradle_modules` | The discovered inventory: each project's name, path, **kind**, git-repo flag, **base package**, short alias. Look packages up instead of guessing - several roots are counter-intuitive. |
 | `gradle_verify` | Module-scoped gradle tasks with the **true** exit code, noise stripped, first failure surfaced. |
 | `gradle_tally` | `build/test-results/test/*.xml` -> `{tests, passed, failed, errors, skipped, failing_tests[]}`. |
 | `java_reorder_imports` | Java imports to the IntelliJ **Default** layout, byte-for-byte. Idempotent; wildcard- and CRLF-safe. |
@@ -135,7 +135,7 @@ toolsmith branch finish --no-merge         # push + open the PR, stop for review
 toolsmith branch finish --yes --delete-remote
 ```
 
-- **The repository is named the way every other command names one**: a module shorthand, a module name, or a path, resolved through the workspace's `.toolsmith/modules.json` and `aliases.json`. With no argument it reads the current directory. A token that resolves to neither a known module nor a directory is refused, rather than falling back to the current directory and finishing whatever branch the shell was sitting on. A repository that is not a discovered gradle module - toolsmith itself, for one - is named by path.
+- **The repository is named the way every other command names one**: a module shorthand, a module name, or a path, resolved through the workspace's `.toolsmith/modules.json` and `aliases.json`. With no argument it reads the current directory. A token that resolves to neither a known module nor a directory is refused, rather than falling back to the current directory and finishing whatever branch the shell was sitting on. Discovery records every git repository root, so a repository carrying no build file is nameable too.
 - **The merge is a merge commit.** `--squash` and `--rebase` exist only to be refused with the reason: commits here are often independently gated units, and flattening them destroys the per-commit revert granularity that gating produced.
 - **The post-merge check is ancestry, not equality.** A true merge leaves a merge commit at the base tip, so `rev-parse <base> == rev-parse <branch>` is false on *every* successful merge; what holds is `git merge-base --is-ancestor <branch-sha> <base>`, asked about a sha captured before the checkout. The delete is `git branch -d`, never `-D`, so an unmerged branch is refused even if that check is ever wrong.
 - **The base branch is detected**, from origin's head and then `gh repo view` - nothing assumes `master` or `main`.

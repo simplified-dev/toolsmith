@@ -71,6 +71,31 @@ def package_root(token: str) -> str | None:
     return m["package"] if m else None
 
 
+def kind_of(token: str) -> str | None:
+    """Returns the build system recorded for a module, or None if it names none.
+
+    None is not "no build system": it is also every bare filesystem path, which
+    resolve_module accepts and the inventory has never heard of. So a caller
+    refusing a wrong kind must refuse a KNOWN wrong one and let None through,
+    or naming a module by path would stop working.
+
+    Args:
+        token: module shorthand, name, or path.
+
+    Returns:
+        "gradle", "maven", "python", or None when the token matches no module or
+        the module declares no build system.
+    """
+    m = _lookup(token)
+    return m.get("kind") if m else None
+
+
+def is_repo(token: str) -> bool:
+    """Whether a module is its own git repository root, by the cached scan."""
+    m = _lookup(token)
+    return bool(m and m.get("repo"))
+
+
 def find_gradle_root(start: Path) -> Path | None:
     """Walks up from start to the nearest directory holding a gradle wrapper."""
     current = start.resolve()

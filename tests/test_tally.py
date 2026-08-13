@@ -1,7 +1,7 @@
 """Tests for the JUnit result tally."""
 from __future__ import annotations
 
-from toolsmith.tally import tally_dir
+from toolsmith.tally import tally, tally_dir
 
 SUITE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="com.x.WidgetTest" tests="4" skipped="1" failures="1" errors="1">
@@ -17,6 +17,22 @@ def _make_results(tmp_path):
     results = tmp_path / "build" / "test-results" / "test"
     results.mkdir(parents=True)
     (results / "TEST-com.x.WidgetTest.xml").write_text(SUITE_XML, encoding="utf-8")
+
+
+def test_a_non_gradle_project_says_so_rather_than_reporting_no_tests(tmp_path, monkeypatch):
+    """An absent JUnit directory reads as "no tests" and says nothing about why."""
+    from toolsmith import modules
+
+    (tmp_path / "toolsmith").mkdir()
+    module = {"shorthand": "ts", "name": "toolsmith", "path": "toolsmith", "kind": "python",
+              "repo": True, "package": None, "buildable": False}
+    monkeypatch.setattr(modules, "_inventory",
+                        lambda: (tmp_path, [module], {"ts": module}, {"toolsmith": module}))
+
+    result = tally("toolsmith")
+
+    assert result["found"] is False
+    assert "python" in result["note"]
 
 
 def test_counts_and_failing_names(tmp_path):

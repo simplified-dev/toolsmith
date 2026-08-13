@@ -18,8 +18,9 @@ toolsmith branch finish ar         # name the repository rather than standing in
 The repository is named like every other command names one - a module shorthand,
 a module name, or a path - and with no argument it reads the current directory.
 A token matching neither a known module nor a directory is refused rather than
-falling back to the current directory. A repository that is not a discovered
-gradle module is named by path.
+falling back to the current directory. Discovery records every git repository
+root, whatever it builds with and whether it builds at all, so a repository is
+nameable by alias even when it carries no build file.
 
 ## The user decides when this runs
 

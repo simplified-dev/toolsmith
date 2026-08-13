@@ -314,12 +314,17 @@ def jitpack_order(artifact: str) -> dict:
 
 @mcp.tool()
 def gradle_modules() -> dict:
-    """List the workspace's discovered gradle modules.
+    """List the workspace's discovered projects.
 
-    Each module: name, path (workspace-relative), package (base Java package),
-    shorthand (short alias), buildable. Reads the cache written by `toolsmith
-    setup`. Use this to look up a module's real base package or alias instead of
-    guessing paths - several package roots do not match the directory name.
+    Each module: name, path (workspace-relative), kind ("gradle", "maven",
+    "python", or null for a repository declaring no build system), repo (whether
+    it is a git repository root), package (base Java package), shorthand (short
+    alias), buildable. Reads the cache written by `toolsmith setup`. Use this to
+    look up a module's real base package or alias instead of guessing paths -
+    several package roots do not match the directory name.
+
+    kind and repo vary independently: a gradle module can sit inside a
+    repository it does not own, and a repository can carry no build file at all.
     """
     root = _modules.workspace_root()
     mods = _modules.get_modules()
