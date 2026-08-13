@@ -106,7 +106,7 @@ toolsmith jitpack build d4j          # trigger + wait for one build; prints the 
 toolsmith jitpack pins               # workspace pin-drift table (commits behind / unbuilt / stale)
 toolsmith jitpack order coll         # what to re-pin after collections changes, in order
 toolsmith jitpack set coll SHA       # rewrite that pin everywhere (--check, --module, --no-verify)
-toolsmith branch finish              # push, open the PR, merge it, pull the base, delete the branch
+toolsmith branch finish [ar]         # push, open the PR, merge it, pull the base, delete the branch
 toolsmith serve                      # run the stdio MCP server (what the plugin launches)
 ```
 
@@ -130,10 +130,12 @@ Six subcommands moved under the two umbrellas. Each old spelling still runs, pri
 ```bash
 toolsmith branch finish --dry-run          # the plan, mutating nothing
 toolsmith branch finish                    # prompts before the merge
+toolsmith branch finish ar                 # name the repository instead of standing in it
 toolsmith branch finish --no-merge         # push + open the PR, stop for review
 toolsmith branch finish --yes --delete-remote
 ```
 
+- **The repository is named the way every other command names one**: a module shorthand, a module name, or a path, resolved through the workspace's `.toolsmith/modules.json` and `aliases.json`. With no argument it reads the current directory. A token that resolves to neither a known module nor a directory is refused, rather than falling back to the current directory and finishing whatever branch the shell was sitting on. A repository that is not a discovered gradle module - toolsmith itself, for one - is named by path.
 - **The merge is a merge commit.** `--squash` and `--rebase` exist only to be refused with the reason: commits here are often independently gated units, and flattening them destroys the per-commit revert granularity that gating produced.
 - **The post-merge check is ancestry, not equality.** A true merge leaves a merge commit at the base tip, so `rev-parse <base> == rev-parse <branch>` is false on *every* successful merge; what holds is `git merge-base --is-ancestor <branch-sha> <base>`, asked about a sha captured before the checkout. The delete is `git branch -d`, never `-D`, so an unmerged branch is refused even if that check is ever wrong.
 - **The base branch is detected**, from origin's head and then `gh repo view` - nothing assumes `master` or `main`.

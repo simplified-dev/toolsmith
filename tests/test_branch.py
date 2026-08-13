@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from toolsmith import branch as branch_mod
-from toolsmith import cli
+from toolsmith import cli, modules
 from toolsmith.branch import branch_finish, exit_code
 
 BRANCH = "feature/the-thing"
@@ -693,6 +693,96 @@ def test_cli_squash_exits_two(ws, gh, monkeypatch, capsys):
     assert "BRANCH: PRECONDITION" in captured.out
     assert "refused" in captured.err
     assert gh.commands == []
+
+
+def _seed_inventory(monkeypatch, root: Path | None, module: dict | None = None) -> None:
+    """Replaces the cached module inventory with one the test controls.
+
+    ``modules._inventory`` is lru_cached over the real workspace cache, so it is
+    the seam rather than the json on disk.
+    """
+    mods = [module] if module else []
+    by_short = {module["shorthand"]: module} if module else {}
+    by_name = {module["name"]: module} if module else {}
+    monkeypatch.setattr(modules, "_inventory", lambda: (root, mods, by_short, by_name))
+
+
+def test_cli_finish_resolves_a_module_shorthand(ws, gh, monkeypatch, capsys):
+    """The repository is named the way every other command names one.
+
+    The cwd is a directory that is no repository at all, so nothing but the
+    shorthand can be what found the branch.
+    """
+    monkeypatch.setattr(branch_mod, "_gh", gh)
+    _seed_inventory(monkeypatch, ws.work.parent,
+                    {"shorthand": "wk", "name": "the-work", "path": "work",
+                     "package": None, "buildable": False})
+    monkeypatch.chdir(ws.scratch)
+    tip = ws.sha(ws.branch)
+
+    rc = cli.main(["branch", "finish", "wk", "--yes"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BRANCH: FINISHED" in out
+    assert ws.branch not in ws.locals()
+    assert _git_rc(ws.work, "merge-base", "--is-ancestor", tip, ws.base) == 0
+
+
+def test_cli_finish_takes_a_path_when_the_repository_is_no_module(ws, gh, monkeypatch, capsys):
+    """Discovery scans for gradle modules, so a repository that is not one - toolsmith
+    itself - has only a path to be named by."""
+    monkeypatch.setattr(branch_mod, "_gh", gh)
+    _seed_inventory(monkeypatch, None)
+    monkeypatch.chdir(ws.scratch)
+
+    rc = cli.main(["branch", "finish", str(ws.work), "--yes"])
+
+    assert rc == 0
+    assert "BRANCH: FINISHED" in capsys.readouterr().out
+    assert ws.branch not in ws.locals()
+
+
+def test_cli_finish_refuses_a_token_that_resolves_to_nothing(ws, gh, monkeypatch, capsys):
+    """A miss must not read as the current directory.
+
+    resolve_module answers None for "no such module" and for "no such directory"
+    alike, and branch_finish reads None as the cwd - so a mistyped module that
+    fell through would finish whatever branch the shell was sitting on. The cwd
+    here is a real repository on a real feature branch, which is what gives the
+    fallback something to destroy.
+    """
+    monkeypatch.setattr(branch_mod, "_gh", gh)
+    _seed_inventory(monkeypatch, None)
+    monkeypatch.chdir(ws.work)
+    before = ws.snapshot()
+
+    rc = cli.main(["branch", "finish", "no-such-module", "--yes"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "BRANCH: PRECONDITION" in captured.out
+    assert "no-such-module" in captured.err
+    assert gh.commands == []
+    assert ws.snapshot() == before
+
+
+def test_cli_names_a_skipped_step_without_claiming_it_was_done(ws, gh, monkeypatch, capsys):
+    """delete-remote is skipped because it was never asked for.
+
+    A summary calling that "already done" says the remote branch was deleted by
+    an earlier run, which is the opposite of what happened.
+    """
+    monkeypatch.setattr(branch_mod, "_gh", gh)
+    monkeypatch.chdir(ws.work)
+
+    rc = cli.main(["branch", "finish", "--yes"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "skipped: delete-remote" in out
+    assert "already done" not in out
+    assert ws.branch in "\n".join(ws.remotes())
 
 
 def test_finish_is_not_an_mcp_tool():
