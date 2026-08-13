@@ -417,8 +417,10 @@ def branch_finish(repo: str | Path | None = None, *, title: str | None = None,
             makes an unattended merge a precondition failure.
 
     Returns:
-        dict with repo_dir, branch, base, base_source, branch_sha, title, ahead,
-        pr, steps, skipped, ok and status, where status is one of:
+        dict with repo_dir, branch, base, base_source, branch_sha, base_sha,
+        title, ahead, pr, steps, skipped, ok and status. base_sha is where the
+        base ended up, read after the pull and None on a dry run or on any
+        failure before it. status is one of:
 
           "finished"     - the whole ritual ran or was already done; ok
           "opened"       - --no-merge, so it stopped with the pull request open; ok
@@ -433,8 +435,8 @@ def branch_finish(repo: str | Path | None = None, *, title: str | None = None,
     """
     runner = gh or _gh
     info: dict = {"repo_dir": None, "branch": None, "base": None, "base_source": None,
-                  "branch_sha": None, "title": None, "ahead": None, "pr": None,
-                  "merge_method": merge_method, "dry_run": dry_run}
+                  "branch_sha": None, "base_sha": None, "title": None, "ahead": None,
+                  "pr": None, "merge_method": merge_method, "dry_run": dry_run}
 
     def refuse(message: str, **extra) -> dict:
         return {**info, "ok": False, "status": "precondition", "steps": [], "skipped": [],
@@ -656,6 +658,14 @@ def branch_finish(repo: str | Path | None = None, *, title: str | None = None,
     if outcome is not None:
         return outcome
 
+    # Where the base ended up, read once the pull has brought the merge down.
+    # It is reported as the base TIP rather than as "the merge commit", which it
+    # is only as long as nothing else landed between the merge and the pull -
+    # true here and not this command's to promise. It is what a revert of this
+    # landing starts from, and the one number the ritual otherwise never says.
+    if not dry_run:
+        info["base_sha"] = _git(repo_dir, "rev-parse", base_name)
+
     # ---- validate ----
     validate_command = f"git merge-base --is-ancestor {_short(branch_sha)} {base_name}"
     if dry_run:
@@ -676,7 +686,8 @@ def branch_finish(repo: str | Path | None = None, *, title: str | None = None,
                           f"{_short(branch_sha)} - the merge did not land",
                           note=_STALE_BASE_NOTE)
         record("validate", "done", validate_command,
-               f"'{base_name}' contains {_short(branch_sha)}")
+               f"'{base_name}' contains {_short(branch_sha)}, now at "
+               f"{_short(info['base_sha'])}")
 
     # ---- delete-local ----
     delete_command = f"git branch -d {branch}"

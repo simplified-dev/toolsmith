@@ -53,6 +53,11 @@ toolsmith branch finish --dry-run
 
 ## Rules worth knowing before you edit or replace this
 
+- **It reports where the base landed**, as `master@<sha>` on the verdict line
+  and in the validate step. That sha is what a revert of the landing starts
+  from. It is read after the pull, because at merge time the merge exists only
+  on the remote and gh has answered with a pull request number rather than a
+  commit; it is `None` on a dry run and on any failure before the pull.
 - **The merge method is `--merge`.** Not squash, not rebase. Commits here are
   often independently gated units, and flattening them destroys the per-commit
   revert granularity that gating produced. `--squash` and `--rebase` exist as
