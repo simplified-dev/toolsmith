@@ -15,6 +15,9 @@ A general-purpose **Java workspace dev toolkit for AI agents**, packaged as a Cl
 - [MCP tools](#mcp-tools)
 - [Bundled skills](#bundled-skills)
 - [CLI](#cli)
+  - [Moved spellings](#moved-spellings)
+- [Finishing a branch](#finishing-a-branch)
+- [Re-pinning a cascade](#re-pinning-a-cascade)
 - [How discovery works](#how-discovery-works)
 - [Import ordering](#import-ordering)
 - [Architecture](#architecture)
@@ -60,13 +63,15 @@ Run `/mcp` to confirm the `toolsmith` server loaded. (Standalone alternative: sk
 
 ## MCP tools
 
+A prefix names **who can use** the tool: `gradle_*` needs a gradle build, `java_*` acts on Java source files, `jitpack_*` reaches JitPack.
+
 | Tool | What it does |
 |------|--------------|
-| `list_modules` | The discovered inventory: each module's name, path, **base package**, short alias. Look packages up instead of guessing - several roots are counter-intuitive. |
+| `gradle_modules` | The discovered inventory: each module's name, path, **base package**, short alias. Look packages up instead of guessing - several roots are counter-intuitive. |
 | `gradle_verify` | Module-scoped gradle tasks with the **true** exit code, noise stripped, first failure surfaced. |
-| `test_tally` | `build/test-results/test/*.xml` -> `{tests, passed, failed, errors, skipped, failing_tests[]}`. |
-| `reorder_imports` | Java imports to the IntelliJ **Default** layout, byte-for-byte. Idempotent; wildcard- and CRLF-safe. |
-| `javadoc_normalize` | Audit or `--fix` javadocs against the project conventions. |
+| `gradle_tally` | `build/test-results/test/*.xml` -> `{tests, passed, failed, errors, skipped, failing_tests[]}`. |
+| `java_reorder_imports` | Java imports to the IntelliJ **Default** layout, byte-for-byte. Idempotent; wildcard- and CRLF-safe. |
+| `java_docs_normalize` | Audit or `--fix` the javadocs in Java source against the project conventions. |
 | `jitpack_status` | Is a module's commit built on JitPack? One read of the versionless build list - **never** triggers a build. |
 | `jitpack_build` | Precheck, then trigger and wait for **one** build of a sha. Returns the verdict, the ready-to-paste `strictly(...)` pin, and the failing `build.log` tail. |
 | `jitpack_set` | Rewrite one artifact's pin across every build file that declares it. Exact match, both dialects, sha verified before writing, idempotent - and zero matches is an **error**, not a silent no-op. |
@@ -76,32 +81,65 @@ Run `/mcp` to confirm the `toolsmith` server loaded. (Standalone alternative: sk
 
 The plugin ships the Java skills so they travel with it (they stay skills, not MCP tools - routing skills carry no logic and would only cost per-turn schema tokens):
 
-- **java-file-mover** - move/relocate/rename a `.java` file with package statement, imports, git history, and cross-module deps all handled (delegates reorder to `toolsmith reorder`, gate to `gradle-verify-gate`).
+- **java-file-mover** - move/relocate/rename a `.java` file with package statement, imports, git history, and cross-module deps all handled (delegates reorder to `toolsmith java reorder`, gate to `gradle-verify-gate`).
 - **transcript-mine** - distill past session transcripts into ranked artifacts (tool/command frequency, error histograms).
 - **java-bulk-rename**, **java-symbol-search**, **java-find-usages** - route renames/searches to IntelliJ MCP.
 - **java-import-audit**, **java-modifier-audit**, **java-record-audit** - convention audits.
 - **java-exception-class-gen** - generate a conforming exception class.
-- **gradle-verify-gate** (wraps `toolsmith verify`), **javadoc-normalize** (wraps `toolsmith javadoc`), **jmh-regression-gate**.
+- **branch-finish** - the end-of-branch ritual (wraps `toolsmith branch finish`), so the eight git/gh steps are one command instead of hand-rolled.
+- **gradle-verify-gate** (wraps `toolsmith gradle verify`), **java-docs-normalize** (wraps `toolsmith java docs`), **java-jmh-regression-gate**.
 
 ## CLI
 
-Every tool is also a shell subcommand (folding the former `gw` / `jtally` / `locate-java` helpers):
+Every tool is also a shell subcommand. A group names **who can use** what it holds: `java` needs Java source, `gradle` needs a gradle build, `jitpack` reaches an external service and `branch` reaches git. `setup` and `serve` stay top-level - they bootstrap the rest.
 
 ```bash
-toolsmith setup [ROOT]          # discover + cache a workspace's modules
-toolsmith modules               # print the cached inventory
-toolsmith verify ar test        # module-scoped gradle gate (alias or name)
-toolsmith tally d4j             # JUnit tally
-toolsmith reorder --check src   # import order gate (or without --check to rewrite)
-toolsmith javadoc --fix src     # javadoc audit / fix
-toolsmith locate TypeRegistrar  # find a class file across module sources
-toolsmith jitpack status d4j    # are the module's commits built on JitPack (read-only)
-toolsmith jitpack build d4j     # trigger + wait for one build; prints the strictly(<sha>) pin
-toolsmith jitpack pins          # workspace pin-drift table (commits behind / unbuilt / stale)
-toolsmith jitpack order coll    # what to re-pin after collections changes, in order
-toolsmith jitpack set coll SHA  # rewrite that pin everywhere (--check, --module, --no-verify)
-toolsmith serve                 # run the stdio MCP server (what the plugin launches)
+toolsmith setup [ROOT]               # discover + cache a workspace's modules
+toolsmith gradle modules             # print the cached inventory
+toolsmith gradle verify ar test      # module-scoped gradle gate (alias or name)
+toolsmith gradle tally d4j           # JUnit tally
+toolsmith java reorder --check src   # import order gate (or without --check to rewrite)
+toolsmith java docs --fix src        # javadoc audit / fix
+toolsmith java locate TypeRegistrar  # find a class file across module sources
+toolsmith jitpack status d4j         # are the module's commits built on JitPack (read-only)
+toolsmith jitpack build d4j          # trigger + wait for one build; prints the strictly(<sha>) pin
+toolsmith jitpack pins               # workspace pin-drift table (commits behind / unbuilt / stale)
+toolsmith jitpack order coll         # what to re-pin after collections changes, in order
+toolsmith jitpack set coll SHA       # rewrite that pin everywhere (--check, --module, --no-verify)
+toolsmith branch finish              # push, open the PR, merge it, pull the base, delete the branch
+toolsmith serve                      # run the stdio MCP server (what the plugin launches)
 ```
+
+### Moved spellings
+
+Six subcommands moved under the two umbrellas. Each old spelling still runs, prints a one-line notice on stderr naming its replacement, and is hidden from `--help`:
+
+| Deprecated | Current |
+|---|---|
+| `toolsmith modules` | `toolsmith gradle modules` |
+| `toolsmith verify` | `toolsmith gradle verify` |
+| `toolsmith tally` | `toolsmith gradle tally` |
+| `toolsmith locate` | `toolsmith java locate` |
+| `toolsmith reorder` | `toolsmith java reorder` |
+| `toolsmith javadoc` | `toolsmith java docs` |
+
+## Finishing a branch
+
+`toolsmith branch finish` is the end-of-branch ritual as one command: push, write the PR body to a file, `gh pr create`, `gh pr merge --merge`, check out the base, pull it, confirm it really contains the branch, and delete the local branch. Run `--dry-run` first to see the ordered plan.
+
+```bash
+toolsmith branch finish --dry-run          # the plan, mutating nothing
+toolsmith branch finish                    # prompts before the merge
+toolsmith branch finish --no-merge         # push + open the PR, stop for review
+toolsmith branch finish --yes --delete-remote
+```
+
+- **The merge is a merge commit.** `--squash` and `--rebase` exist only to be refused with the reason: commits here are often independently gated units, and flattening them destroys the per-commit revert granularity that gating produced.
+- **The post-merge check is ancestry, not equality.** A true merge leaves a merge commit at the base tip, so `rev-parse <base> == rev-parse <branch>` is false on *every* successful merge; what holds is `git merge-base --is-ancestor <branch-sha> <base>`, asked about a sha captured before the checkout. The delete is `git branch -d`, never `-D`, so an unmerged branch is refused even if that check is ever wrong.
+- **The base branch is detected**, from origin's head and then `gh repo view` - nothing assumes `master` or `main`.
+- **Re-running resumes.** A branch origin already carries, a PR already open for the head, a PR already merged: each is detected and reported as skipped rather than redone.
+- **A merge needs an answer.** With a terminal it asks; without one it refuses before mutating anything unless `--yes` is passed.
+- **CLI only, deliberately.** It pushes, opens and merges, so it is not an MCP tool: the user decides when it runs.
 
 ## Re-pinning a cascade
 
@@ -111,7 +149,7 @@ toolsmith serve                 # run the stdio MCP server (what the plugin laun
 toolsmith jitpack order collections     # -> collections -> utils -> reflection -> ...
 # then, one module at a time, in that order:
 toolsmith jitpack set collections <sha> --module utils
-toolsmith verify utils                  # gate the edit locally
+toolsmith gradle verify utils           # gate the edit locally
 git -C ../utils commit -am "..."        # then push
 toolsmith jitpack build utils           # -> the new sha for the next step
 ```
@@ -126,7 +164,7 @@ toolsmith jitpack build utils           # -> the new sha for the next step
 
 ## Import ordering
 
-`reorder_imports` reproduces the IntelliJ **Default** scheme: group 1 = all other non-static (ASCII sort), blank, group 2 = `javax.*` then `java.*` (not alphabetical), blank, group 3 = all static. Only `java`/`javax` are special-cased; wildcards and CRLF/LF are preserved; idempotent. Prefer the live IntelliJ MCP Optimize Imports when attached; this is the faithful IDE-independent fallback.
+`java_reorder_imports` reproduces the IntelliJ **Default** scheme: group 1 = all other non-static (ASCII sort), blank, group 2 = `javax.*` then `java.*` (not alphabetical), blank, group 3 = all static. Only `java`/`javax` are special-cased; wildcards and CRLF/LF are preserved; idempotent. Prefer the live IntelliJ MCP Optimize Imports when attached; this is the faithful IDE-independent fallback.
 
 ## Architecture
 
@@ -140,8 +178,8 @@ src/toolsmith/
   server.py       FastMCP server (thin veneer over the modules below)
   discovery.py    scan + cache + root resolution
   modules.py      cache-backed module/alias/package lookup
-  gradle.py · tally.py · imports.py · javadoc.py · jitpack.py   one module per tool
-tests/            pytest suite (discovery, reorderer, tally)
+  gradle.py · tally.py · imports.py · javadoc.py · jitpack.py · branch.py   one module per tool
+tests/            pytest suite (discovery, reorderer, tally, jitpack, branch)
 notes/            provenance: the token-optimization audit that produced this
 ```
 

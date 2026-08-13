@@ -2,7 +2,7 @@
 """Audit and normalize Java javadocs against user-CLAUDE.md conventions.
 
 Usage:
-    normalize.py [--fix] [--scope class|method|field|all] PATH [PATH...]
+    toolsmith java docs [--fix] [--scope class|method|field|all] PATH [PATH...]
 
 Without --fix: prints a report.
 With    --fix: applies safe auto-fixes in place, then prints a report.
@@ -557,7 +557,7 @@ def gather(paths: list[Path], excludes: list[str] | None = None):
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog='javadoc-normalize',
+    ap = argparse.ArgumentParser(prog='toolsmith.javadoc',
         description='Audit/normalize Java javadocs against project conventions.')
     ap.add_argument('paths', nargs='+', type=Path)
     ap.add_argument('--fix', action='store_true', help='Apply safe fixes in place')

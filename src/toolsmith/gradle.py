@@ -95,8 +95,8 @@ def gradle_verify(
                      for a clean run under -q; not evidence the build no-opped.
 
         In particular `lines` is never a test tally. Counts printed there come
-        from whatever the build spawned, not from gradle_verify - use test_tally
-        or the JUnit XML for real numbers.
+        from whatever the build spawned, not from gradle_verify - use
+        gradle_tally or the JUnit XML for real numbers.
     """
     if tasks is None:
         tasks = ["compileJava", "compileTestJava"] if compile_only else ["compileJava", "test"]

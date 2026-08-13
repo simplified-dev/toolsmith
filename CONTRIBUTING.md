@@ -71,6 +71,7 @@ All development is based on the `master` branch.
 - Use Google-style docstrings (`Args:` / `Returns:`) - match the existing modules.
 - Keep each tool's real logic in its library module (`toolsmith.gradle`, `toolsmith.tally`, ...); `toolsmith.server` stays a thin typed veneer that forwards to it.
 - A new MCP tool should also be usable from the command line (a `main()` / `python -m` entry), so its logic is testable without the MCP layer.
+- Name a new tool, subcommand, or skill after **who can use it** rather than after what it parses: `gradle_*` / `toolsmith gradle <cmd>` for anything that needs a Gradle build, `java_*` / `toolsmith java <cmd>` for anything that acts on Java source. State that requirement in the docstring or the skill `description` as well - that text is what gets matched when the tool is chosen.
 
 ### Commit Messages
 

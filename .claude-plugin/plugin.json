@@ -1,7 +1,7 @@
 {
   "name": "toolsmith",
   "version": "0.1.0",
-  "description": "General-purpose Java workspace dev tools for Claude: discover modules, gradle verify, JUnit tally, IntelliJ-faithful import reorder, and javadoc normalize as MCP tools, plus bundled Java refactor / move / audit skills.",
+  "description": "General-purpose Java workspace dev tools for Claude: gradle_* MCP tools for a gradle module (module discovery, verify, JUnit tally), java_* MCP tools for Java source (IntelliJ-faithful import reorder, javadoc normalize), jitpack_* for JitPack, plus bundled Java refactor / move / audit skills.",
   "author": { "name": "Simplified" },
   "license": "Apache-2.0",
   "keywords": ["java", "gradle", "mcp", "developer-tools", "intellij", "imports", "refactor"],

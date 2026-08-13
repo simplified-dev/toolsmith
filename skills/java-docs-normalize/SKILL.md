@@ -1,11 +1,11 @@
 ---
-name: javadoc-normalize
-description: Audit and normalize Java javadocs against user CLAUDE.md conventions. Auto-fixes block form, --/em-dashes, @author/@since, trailing periods, column-aligned @params. Flags FQN refs, Gets/Returns prefixes on field-like docs, and missing @param/@return for manual review. Claude invokes this BEFORE any manual javadoc edit across one or more Java files.
+name: java-docs-normalize
+description: Audit and normalize the javadocs of Java source files against user CLAUDE.md conventions. Auto-fixes block form, --/em-dashes, @author/@since, trailing periods, column-aligned @params. Flags FQN refs, Gets/Returns prefixes on field-like docs, and missing @param/@return for manual review. Claude invokes this BEFORE any manual javadoc edit across one or more Java files.
 auto_invoke: true
 tags: [java, javadoc, style, lint, batch-fix]
 ---
 
-# javadoc-normalize
+# java-docs-normalize
 
 Run this skill BEFORE manually editing Java javadocs. The script handles the
 mechanical bulk; you handle only what it flags.
@@ -24,19 +24,19 @@ just edit. Threshold: more than one javadoc deviation or more than one file.
 
 ## How to use
 
-Run it through the toolsmith CLI (`toolsmith javadoc`) - the same logic as the
-former `normalize.py`, bundled in this plugin.
+Run it through the toolsmith CLI (`toolsmith java docs`), which is the same
+logic the `java_docs_normalize` MCP tool exposes.
 
 **Audit only (no changes):**
 
 ```bash
-toolsmith javadoc PATH [PATH ...]
+toolsmith java docs PATH [PATH ...]
 ```
 
 **Apply safe auto-fixes:**
 
 ```bash
-toolsmith javadoc --fix PATH [PATH ...]
+toolsmith java docs --fix PATH [PATH ...]
 ```
 
 `PATH` may be a single `.java` file, a directory (recursive `.java` walk), or a
@@ -86,8 +86,8 @@ Only FQNs starting with `java | javax | com | org | net | dev | io | lib`
 trigger the auto-import. Obscure prefixes (e.g. `a.b.c.X`) are left alone
 deliberately to avoid false positives. Use the `--prefix` CLI flag
 (repeatable, additive) to extend the set without editing the script;
-`DEFAULT_PREFIXES` in `normalize.py` is the source of truth for what's
-always on.
+`DEFAULT_PREFIXES` in `toolsmith/javadoc.py` is the source of truth for
+what's always on.
 
 Package-only refs - `{@link foo.bar.subpkg subpkg}` where the FQN names a
 package, not a type - are correctly left alone: Java has no syntax for

@@ -21,7 +21,7 @@ javadoc) and a field-equivalent (accessor docs the IDE may auto-generate).
   `@param` name but the description may now be stale.
 
 Skip when: the file has zero `record` declarations. The skill is record-
-specific; for general javadoc audits use `javadoc-normalize`.
+specific; for general javadoc audits use `java-docs-normalize`.
 
 ## CLAUDE.md rules being checked
 
@@ -32,7 +32,7 @@ From the user-global `~/.claude/CLAUDE.md` `## Javadoc` section:
   accessor. No `@return`, no "Gets"/"Returns" prefix.
 - **Record `@param`** describes what the component *is*, not what to *pass*.
 
-The first two are mechanically caught by `javadoc-normalize`'s
+The first two are mechanically caught by `java-docs-normalize`'s
 `gets-prefix` rule. The third - "describes what the component *is*, not
 what to *pass*" - is semantic and needs a heuristic flagger.
 
@@ -59,7 +59,7 @@ on records whose components legitimately are "the value to compare against"
 
 ## How to use
 
-Two passes. Both are scripted as part of `javadoc-normalize` already - this
+Two passes. Both are scripted as part of `java-docs-normalize` already - this
 skill is the routing wrapper that documents the rules and the IntelliJ
 discovery path.
 
@@ -69,12 +69,13 @@ discovery path.
    ```
    Or with the IDE engine: `search_symbol` filtered to record decls.
 
-2. **Audit** - run `javadoc-normalize` against the same paths to catch the
+2. **Audit** - run `java-docs-normalize` against the same paths to catch the
    mechanical violations (`gets-prefix`, oneliner-to-block on component
    docs). For the passing-language heuristic, currently a manual review of
    record component `@param` lines is the path - the heuristic is not yet
-   mechanical (TODO: add `record-param-voice` flag to normalize.py if the
-   audit produces enough hits to justify the regex).
+   mechanical (TODO: add a `record-param-voice` flag to
+   `toolsmith/javadoc.py` if the audit produces enough hits to justify the
+   regex).
 
 ## Sample output expectation
 
@@ -91,7 +92,7 @@ record OptionsPair {
 ## Cross-reference
 
 - Mechanical javadoc rules (`gets-prefix`, oneliner-to-block, `@author`
-  removal) -> `javadoc-normalize`.
+  removal) -> `java-docs-normalize`.
 - Record component renames -> `java-bulk-rename`.
 
 ## After running
