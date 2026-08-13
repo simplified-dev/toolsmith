@@ -12,7 +12,14 @@ The end-of-branch ritual as one command instead of eight hand-run steps.
 ```bash
 toolsmith branch finish            # the whole thing, prompting before the merge
 toolsmith branch finish --dry-run  # the ordered plan, mutating nothing
+toolsmith branch finish ar         # name the repository rather than standing in it
 ```
+
+The repository is named like every other command names one - a module shorthand,
+a module name, or a path - and with no argument it reads the current directory.
+A token matching neither a known module nor a directory is refused rather than
+falling back to the current directory. A repository that is not a discovered
+gradle module is named by path.
 
 ## The user decides when this runs
 
@@ -66,6 +73,7 @@ toolsmith branch finish --dry-run
 
 | Flag | What it does |
 |---|---|
+| `MODULE` | positional: module shorthand, module name, or a path inside the repository (default: the current directory) |
 | `--title` | pull request title (default: the branch's last commit subject) |
 | `--body-file FILE` | use this body instead of one composed from commit subjects |
 | `--base BRANCH` | override base detection |

@@ -502,7 +502,20 @@ def _branch_finish(args: argparse.Namespace) -> int:
     # they would earn an argparse usage error, which says nothing about why the
     # merge method is not a choice here.
     method = "squash" if args.squash else ("rebase" if args.rebase else branch.MERGE_METHOD)
+    # A token resolving to nothing REFUSES rather than falling through to None,
+    # which branch_finish reads as the current directory: a mistyped module would
+    # otherwise finish whatever branch the shell happens to be sitting on.
+    repo = None
+    if args.repo:
+        repo = modules.resolve_module(args.repo)
+        if repo is None:
+            _print(f"'{args.repo}' is neither a known module nor a directory - run "
+                   f"'toolsmith setup' if a module that should resolve does not",
+                   file=sys.stderr)
+            print("BRANCH: PRECONDITION")
+            return 2
     r = branch.branch_finish(
+        repo,
         title=args.title,
         body_file=args.body_file,
         base=args.base,
@@ -521,8 +534,11 @@ def _branch_finish(args: argparse.Namespace) -> int:
     print(f"repo={r['repo_dir']} branch={r['branch']} base={r['base']} "
           f"({r['base_source']}) tip={(r['branch_sha'] or '')[:7]}")
     _branch_steps(r["steps"])
+    # "skipped" and not "already done": a step is skipped both when the work was
+    # already there and when it was never asked for, and delete-remote without
+    # --delete-remote is the second kind. Each step's own detail says which.
     if r["skipped"]:
-        print(f"already done: {', '.join(r['skipped'])}")
+        print(f"skipped: {', '.join(r['skipped'])}")
     if r.get("note"):
         _print(r["note"], file=sys.stderr)
     if r.get("error"):
@@ -763,6 +779,9 @@ def build_parser() -> argparse.ArgumentParser:
                                        "commit: commits here are often independently gated "
                                        "units, and a squash destroys the per-commit revert "
                                        "granularity that gating produced.")
+    a.add_argument("repo", nargs="?", default=None, metavar="MODULE",
+                   help="module shorthand, module name, or a path inside the repository "
+                        "(default: the current directory)")
     a.add_argument("--title", default=None,
                    help="pull request title (default: the branch's last commit subject)")
     a.add_argument("--body-file", default=None, metavar="FILE",
