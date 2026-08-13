@@ -25,6 +25,86 @@ def test_scan_finds_modules_and_base_packages(tmp_path):
     assert all(m["buildable"] for m in mods)
 
 
+def _make_project(root, rel, marker: str, *, git: bool = False):
+    """A directory declaring one build system, optionally a repository root."""
+    d = root / rel
+    d.mkdir(parents=True)
+    (d / marker).write_text("", encoding="utf-8")
+    if git:
+        (d / ".git").mkdir()
+    return d
+
+
+def test_scan_records_each_build_system(tmp_path):
+    _make_project(tmp_path, "a/grad", "build.gradle")
+    _make_project(tmp_path, "a/kts", "build.gradle.kts")
+    _make_project(tmp_path, "a/mvn", "pom.xml")
+    _make_project(tmp_path, "a/py", "pyproject.toml")
+    _make_project(tmp_path, "a/legacy-py", "setup.py")
+
+    _root, mods = discovery.scan(tmp_path)
+
+    kinds = {m["name"]: m["kind"] for m in mods}
+    assert kinds == {"grad": "gradle", "kts": "gradle", "mvn": "maven",
+                     "py": "python", "legacy-py": "python"}
+
+
+def test_a_directory_declaring_two_build_systems_is_the_first_one(tmp_path):
+    """A gradle project holding a pyproject.toml for its dev scripts is a gradle project."""
+    d = _make_project(tmp_path, "both", "build.gradle.kts")
+    (d / "pyproject.toml").write_text("", encoding="utf-8")
+
+    _root, mods = discovery.scan(tmp_path)
+
+    assert [m["kind"] for m in mods] == ["gradle"]
+
+
+def test_a_repository_with_no_build_file_is_still_discovered(tmp_path):
+    """branch finish works on repositories, so a repository is a row on its own."""
+    _make_project(tmp_path, "docs-only", "README.md", git=True)
+
+    _root, mods = discovery.scan(tmp_path)
+
+    assert len(mods) == 1
+    assert mods[0]["name"] == "docs-only"
+    assert mods[0]["kind"] is None
+    assert mods[0]["repo"] is True
+
+
+def test_kind_and_repo_vary_independently(tmp_path):
+    """A module can sit in a repository it does not own, and a repository can carry no build."""
+    _make_project(tmp_path, "repo", "build.gradle.kts", git=True)
+    _make_project(tmp_path, "repo/nested", "build.gradle.kts")
+
+    _root, mods = discovery.scan(tmp_path)
+
+    by_name = {m["name"]: m for m in mods}
+    assert by_name["repo"]["repo"] is True
+    assert by_name["nested"]["repo"] is False
+    assert by_name["nested"]["kind"] == "gradle"
+
+
+def test_a_directory_declaring_nothing_is_no_row(tmp_path):
+    (tmp_path / "just-a-folder").mkdir()
+
+    _root, mods = discovery.scan(tmp_path)
+
+    assert mods == []
+
+
+def test_buildable_means_a_jvm_source_tree_not_merely_a_src_dir(tmp_path):
+    """A python project has a src/ too, and java locate would search it for .java."""
+    d = _make_project(tmp_path, "py", "pyproject.toml")
+    (d / "src" / "package").mkdir(parents=True)
+    _make_module(tmp_path, "jvm", "dev/acme/thing")
+
+    _root, mods = discovery.scan(tmp_path)
+
+    by_name = {m["name"]: m for m in mods}
+    assert by_name["py"]["buildable"] is False
+    assert by_name["jvm"]["buildable"] is True
+
+
 def test_assign_shorthands_unique_and_override():
     mods = [{"name": n} for n in ("asset-renderer", "minecraft-text", "reflection", "records")]
     discovery.assign_shorthands(mods, overrides={"reflection": "refl"})
@@ -33,6 +113,50 @@ def test_assign_shorthands_unique_and_override():
     assert sh["minecraft-text"] == "mt"
     assert sh["reflection"] == "refl"      # override honored
     assert len(set(sh.values())) == len(sh)  # all unique
+
+
+def test_two_modules_of_one_name_stay_separately_reachable():
+    """A name-keyed override is claimed by every module carrying that name, and the
+    second is unreachable unless it is moved aside - resolution is last-wins."""
+    mods = [{"name": "client", "path": "a/client"}, {"name": "client", "path": "b/client"}]
+
+    discovery.assign_shorthands(mods, overrides={"client": "client"})
+
+    assert [m["shorthand"] for m in mods] == ["client", "client2"]
+
+
+def test_a_path_key_beats_a_name_key():
+    """A name cannot disambiguate two modules that share one; a path always can."""
+    mods = [{"name": "client", "path": "a/client"}, {"name": "client", "path": "b/client"}]
+
+    discovery.assign_shorthands(
+        mods, overrides={"client": "client", "b/client": "bcl"})
+
+    assert [m["shorthand"] for m in mods] == ["client", "bcl"]
+
+
+def test_an_override_beats_a_generated_candidate_that_collides_with_it():
+    """Ordering, not luck: an explicit preference is claimed before any generated one."""
+    mods = [{"name": "reflection", "path": "a/reflection"},
+            {"name": "refl-helper", "path": "b/refl-helper"}]
+
+    discovery.assign_shorthands(mods, overrides={"refl-helper": "ref"})
+
+    sh = {m["name"]: m["shorthand"] for m in mods}
+    assert sh["refl-helper"] == "ref"
+    assert sh["reflection"] == "ref2"
+
+
+def test_every_shorthand_in_a_real_scan_is_unique(tmp_path):
+    _make_module(tmp_path, "one/client", "dev/acme/one")
+    _make_module(tmp_path, "two/client", "dev/acme/two")
+    _make_module(tmp_path, "three/client", "dev/acme/three")
+
+    _root, mods = discovery.scan(tmp_path)
+    discovery.assign_shorthands(mods, overrides={"client": "client"})
+
+    shorthands = [m["shorthand"] for m in mods]
+    assert len(set(shorthands)) == len(shorthands)
 
 
 def test_setup_load_and_resolve_roundtrip(tmp_path, monkeypatch):

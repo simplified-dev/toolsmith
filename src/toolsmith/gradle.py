@@ -17,7 +17,7 @@ import re
 import subprocess
 import tempfile
 
-from .modules import find_gradle_root, resolve_module, workspace_root
+from .modules import find_gradle_root, kind_of, resolve_module, workspace_root
 
 # Hard backstop so a wedged build fails the gate instead of hanging forever.
 # Kept well above a real cold cross-JDK run (single-digit minutes) but low
@@ -105,6 +105,16 @@ def gradle_verify(
     if mod_dir is None:
         return {"module": module, "ok": False,
                 "error": f"module '{module}' not resolved (run 'toolsmith setup'); root={workspace_root()}"}
+
+    # Refused BEFORE the walk, because the walk goes UP: a python project with a
+    # gradle workspace above it resolves that workspace's wrapper and runs a
+    # DIFFERENT project's build rather than failing. An unrecorded kind is not a
+    # wrong one - see modules.kind_of - so only a known non-gradle kind refuses.
+    kind = kind_of(module)
+    if kind is not None and kind != "gradle":
+        return {"module": module, "ok": False,
+                "error": f"'{module}' is a {kind} project - a gradle wrapper found above it "
+                         f"belongs to a different project"}
 
     root = find_gradle_root(mod_dir)
     if root is None:

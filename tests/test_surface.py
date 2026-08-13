@@ -29,6 +29,7 @@ MOVED = [
 ]
 
 INVENTORY = [{"shorthand": "ar", "name": "asset-renderer", "buildable": True,
+              "kind": "gradle", "repo": True,
               "path": "Minecraft-Library/asset-renderer", "package": "lib.minecraft"}]
 
 CURRENT_TOOLS = {

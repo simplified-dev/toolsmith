@@ -14,7 +14,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .modules import resolve_module
+from .modules import kind_of, resolve_module
 
 
 def tally_dir(mod_dir: Path, subdir: str = "", fails_cap: int = 15) -> dict:
@@ -69,6 +69,13 @@ def tally(module: str, subdir: str = "", fails_cap: int = 15) -> dict:
     mod_dir = resolve_module(module)
     if mod_dir is None:
         return {"module": module, "found": False, "note": f"module '{module}' not found"}
+    # A JUnit XML directory a non-gradle project was never going to have reads as
+    # "no tests" and says nothing about why. An unrecorded kind is not a wrong
+    # one, so only a known non-gradle kind is refused.
+    kind = kind_of(module)
+    if kind is not None and kind != "gradle":
+        return {"module": module, "found": False,
+                "note": f"'{module}' is a {kind} project and writes no gradle test results"}
     return {"module": module, **tally_dir(mod_dir, subdir, fails_cap)}
 
 

@@ -67,6 +67,49 @@ def _argv(tmp_path: Path) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# The kind guard. find_gradle_root walks UP, so a non-gradle project sitting
+# under a gradle workspace resolves a DIFFERENT project's wrapper.
+# --------------------------------------------------------------------------
+
+def _seed(monkeypatch, root: Path, module: dict) -> None:
+    from toolsmith import modules
+    monkeypatch.setattr(modules, "_inventory",
+                        lambda: (root, [module], {module["shorthand"]: module},
+                                 {module["name"]: module}))
+
+
+def test_a_non_gradle_project_is_refused_before_the_wrapper_walk(tmp_path, monkeypatch):
+    """The wrapper above it belongs to something else, and running it is worse
+    than refusing: a real build of the wrong project, reported under this name."""
+    root = _fake_gradle(tmp_path)
+    (root / "toolsmith").mkdir()
+    _seed(monkeypatch, root,
+          {"shorthand": "ts", "name": "toolsmith", "path": "toolsmith", "kind": "python",
+           "repo": True, "package": None, "buildable": False})
+
+    result = gradle_verify("toolsmith")
+
+    assert result["ok"] is False
+    assert "python" in result["error"]
+    # The strong half: the wrapper above is REAL and would have written this.
+    assert not (root / ARGV_FILE).exists()
+
+
+def test_a_module_named_by_path_is_not_refused_for_having_no_kind(tmp_path, monkeypatch):
+    """resolve_module accepts a bare path the inventory never heard of, and
+    kind_of answers None for it - which is absence, not a wrong answer."""
+    root = _fake_gradle(tmp_path)
+    _seed(monkeypatch, root,
+          {"shorthand": "other", "name": "other", "path": "other", "kind": "python",
+           "repo": False, "package": None, "buildable": False})
+
+    result = gradle_verify(str(root))
+
+    assert result["ok"] is True
+    assert (root / ARGV_FILE).exists()
+
+
+# --------------------------------------------------------------------------
 # Failure reporting. This path had no coverage at all - the gate had only ever
 # been exercised green-on-green, so nothing proved it could report a red build.
 # --------------------------------------------------------------------------
