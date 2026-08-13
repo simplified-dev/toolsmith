@@ -695,6 +695,51 @@ def test_cli_squash_exits_two(ws, gh, monkeypatch, capsys):
     assert gh.commands == []
 
 
+def test_the_base_tip_is_reported_and_is_the_merge_commit(ws, gh):
+    """The one number a revert of this landing starts from, and the ritual
+    otherwise never says it - the merge step knows only the pull request."""
+    tip = ws.sha(ws.branch)
+
+    result = branch_finish(ws.work, gh=gh, assume_yes=True)
+
+    assert result["ok"]
+    assert result["base_sha"] == ws.sha(ws.base)
+    # A merge commit, so it is NOT the branch tip - the whole reason the
+    # validation is ancestry rather than equality.
+    assert result["base_sha"] != tip
+    assert tip in _git(ws.work, "rev-list", result["base_sha"]).splitlines()
+
+
+def test_a_dry_run_reports_no_landing(ws, gh):
+    """Nothing merged, so there is no base tip to name; the pre-merge one would
+    read as a landing that did not happen."""
+    result = branch_finish(ws.work, gh=gh, dry_run=True)
+
+    assert result["ok"]
+    assert result["base_sha"] is None
+
+
+def test_a_failure_before_the_pull_reports_no_landing(ws, gh, monkeypatch):
+    """base_sha is read after the pull, so a run that never got there has none."""
+    monkeypatch.setattr(branch_mod, "_gh",
+                        lambda *a, **k: _fail("gh: not logged in"))
+    result = branch_finish(ws.work, assume_yes=True)
+
+    assert not result["ok"]
+    assert result["base_sha"] is None
+
+
+def test_cli_prints_where_the_base_landed(ws, gh, monkeypatch, capsys):
+    monkeypatch.setattr(branch_mod, "_gh", gh)
+    monkeypatch.chdir(ws.work)
+
+    rc = cli.main(["branch", "finish", "--yes"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"{ws.base}@{ws.sha(ws.base)[:7]}" in out
+
+
 def _seed_inventory(monkeypatch, root: Path | None, module: dict | None = None) -> None:
     """Replaces the cached module inventory with one the test controls.
 

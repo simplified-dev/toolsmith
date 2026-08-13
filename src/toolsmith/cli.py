@@ -557,7 +557,9 @@ def _branch_finish(args: argparse.Namespace) -> int:
     pr = r.get("pr") or {}
     subject = f"{r['branch']} -> {r['base']}"
     number = f" (pr #{pr['number']})" if pr.get("number") else ""
-    print(f"BRANCH: {_BRANCH_VERDICTS.get(r['status'], 'FAILED')} {subject}{number}")
+    # Where the base ended up: what a revert of this landing starts from.
+    landed = f" {r['base']}@{r['base_sha'][:7]}" if r.get("base_sha") else ""
+    print(f"BRANCH: {_BRANCH_VERDICTS.get(r['status'], 'FAILED')} {subject}{number}{landed}")
     return rc
 
 
