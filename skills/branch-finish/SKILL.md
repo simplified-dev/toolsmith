@@ -72,8 +72,12 @@ toolsmith branch finish --dry-run
   contain, which is the backstop if the check above is ever wrong. Never `-D`.
 - **The base branch is detected**, from origin's head and then `gh repo view`.
   Do not pass `--base master` out of habit; the next repository will not use it.
-- **The pull request body goes to a file.** Bodies carry backticks, `$` and
-  apostrophes, so a heredoc parse-errors on the long ones.
+- **The pull request body goes to a file, authored with the Write tool.** Bodies
+  carry backticks, `$` and apostrophes, so a heredoc parse-errors on the long
+  ones and a shell string mangles them silently. Write it to a scratchpad - a
+  disposable directory outside the repository, never a path git would see - and
+  pass that path to `--body-file`. Revise it by editing that same file rather
+  than by rewriting it, so what is passed is what was reviewed.
 
 ## Flags
 
