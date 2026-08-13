@@ -58,19 +58,19 @@ def gradle_verify(
                      for a clean run under -q; not evidence the build no-opped.
 
         In particular `lines` is never a test tally. Counts printed there come
-        from whatever the build spawned, not from gradle_verify - use test_tally
-        or the JUnit XML for real numbers.
+        from whatever the build spawned, not from gradle_verify - use
+        gradle_tally or the JUnit XML for real numbers.
     """
     return _gradle.gradle_verify(module, tasks=tasks, tail=tail,
                                  compile_only=compile_only, rerun=rerun)
 
 
 @mcp.tool()
-def test_tally(module: str, subdir: str = "", fails: int = 15) -> dict:
-    """Parse a module's JUnit XML and return counts plus the names of failing tests.
+def gradle_tally(module: str, subdir: str = "", fails: int = 15) -> dict:
+    """Parse a gradle module's JUnit XML and return counts plus the names of failing tests.
 
-    Replaces the recurring grep/awk/python one-liners over
-    build/test-results/test/*.xml.
+    Needs a gradle module that has already run its tests. Replaces the recurring
+    grep/awk/python one-liners over build/test-results/test/*.xml.
 
     Args:
         module: module alias, name, or path whose test-results to tally.
@@ -81,8 +81,11 @@ def test_tally(module: str, subdir: str = "", fails: int = 15) -> dict:
 
 
 @mcp.tool()
-def reorder_imports(paths: list[str], check: bool = False) -> dict:
-    """Reorder Java imports to the IntelliJ Default layout (IDE-independent).
+def java_reorder_imports(paths: list[str], check: bool = False) -> dict:
+    """Reorder the imports of Java source files to the IntelliJ Default layout.
+
+    IDE-independent - it acts on the `.java` files it is handed and needs no
+    project model.
 
     Faithful to Optimize Imports: group 1 other, group 2 javax.* then java.*,
     group 3 static; ASCII sort; wildcards and CRLF/LF preserved; idempotent.
@@ -95,13 +98,13 @@ def reorder_imports(paths: list[str], check: bool = False) -> dict:
 
 
 @mcp.tool()
-def javadoc_normalize(
+def java_docs_normalize(
     paths: list[str],
     fix: bool = False,
     scope: str = "all",
     prefix: list[str] | None = None,
 ) -> dict:
-    """Audit (or --fix) Java javadocs against the project conventions.
+    """Audit (or --fix) the javadocs of Java source files against the project conventions.
 
     Args:
         paths: .java files, directories, or globs to process.
@@ -305,11 +308,12 @@ def jitpack_order(artifact: str) -> dict:
 
 
 # Workspace pin drift (`toolsmith jitpack pins`) is deliberately CLI-only, like
-# setup and locate: it is a wide table for a human, not a call in an agent loop.
+# setup and java locate: it is a wide table for a human, not a call in an agent
+# loop.
 
 
 @mcp.tool()
-def list_modules() -> dict:
+def gradle_modules() -> dict:
     """List the workspace's discovered gradle modules.
 
     Each module: name, path (workspace-relative), package (base Java package),

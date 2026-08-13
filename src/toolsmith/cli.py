@@ -1,13 +1,17 @@
 """toolsmith command-line interface.
 
 One installable entry point for the whole toolset: run the MCP server (`serve`),
-discover a workspace (`setup`), and invoke each tool directly from the shell -
-folding the former gw / jtally / locate-java helpers into subcommands.
+discover a workspace (`setup`), and invoke each tool directly from the shell.
+
+A subcommand's group names WHO CAN USE it rather than what it happens to parse:
+`java` holds what needs Java source, `gradle` holds what needs a gradle build,
+`jitpack` reaches an external service and `branch` reaches git.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 
 from . import discovery, gradle, modules
 from . import imports as imports_mod
@@ -76,7 +80,7 @@ def _cmd_reorder(args: argparse.Namespace) -> int:
     return imports_mod.main((["--check"] if args.check else []) + args.paths)
 
 
-def _cmd_javadoc(args: argparse.Namespace) -> int:
+def _cmd_docs(args: argparse.Namespace) -> int:
     from . import javadoc
     argv = (["--fix"] if args.fix else []) + ["--scope", args.scope]
     for prefix in args.prefix:
@@ -125,7 +129,7 @@ def _yn(value: object) -> str:
     return "yes" if value else "no"
 
 
-def _print(text: str, file=sys.stdout) -> None:
+def _print(text: str, file=None) -> None:
     """Prints text a console encoding may not be able to represent.
 
     A build log is arbitrary third-party output and a Windows console is cp1252,
@@ -133,7 +137,12 @@ def _print(text: str, file=sys.stdout) -> None:
     tail with it - at the one moment it is the only diagnostic there is. The
     check is done before printing rather than around it, so a stream that fails
     part-way cannot emit the line twice.
+
+    The default stream is resolved on the call rather than in the signature: a
+    default argument freezes whatever sys.stdout was when this module was
+    imported, so a caller that replaced it afterwards never sees the line.
     """
+    file = sys.stdout if file is None else file
     encoding = getattr(file, "encoding", None) or "utf-8"
     try:
         text.encode(encoding)
@@ -460,47 +469,209 @@ def _jitpack_order(args: argparse.Namespace) -> int:
     return rc
 
 
+# One verdict word per branch finish status, for the reason jitpack has them:
+# "opened" and "planned" are both exit 0 without the branch being finished, and
+# "declined" and "failed" are both exit 1 while meaning opposite things.
+_BRANCH_VERDICTS = {
+    "finished": "FINISHED",
+    "opened": "OPENED",
+    "planned": "PLAN",
+    "declined": "DECLINED",
+    "failed": "FAILED",
+    "precondition": "PRECONDITION",
+}
+
+
+def _branch_steps(steps: list[dict]) -> None:
+    """Prints the ordered ritual, one line per step.
+
+    The command column is what makes a --dry-run readable: the plan is the
+    commands themselves, in the order they would run, rather than a description
+    of them.
+    """
+    cells = [(s["name"], s["state"], s["command"] or "-", s["detail"] or "") for s in steps]
+    widths = [max(len(c[i]) for c in cells) for i in range(3)]
+    for name, state, command, detail in cells:
+        line = f"{name:<{widths[0]}}  {state:<{widths[1]}}  {command:<{widths[2]}}"
+        _print((f"{line}  {detail}" if detail else line).rstrip())
+
+
+def _branch_finish(args: argparse.Namespace) -> int:
+    from . import branch
+    # --squash and --rebase exist to be REFUSED with the reason. Left undeclared
+    # they would earn an argparse usage error, which says nothing about why the
+    # merge method is not a choice here.
+    method = "squash" if args.squash else ("rebase" if args.rebase else branch.MERGE_METHOD)
+    r = branch.branch_finish(
+        title=args.title,
+        body_file=args.body_file,
+        base=args.base,
+        merge_method=method,
+        delete_remote=args.delete_remote,
+        no_merge=args.no_merge,
+        dry_run=args.dry_run,
+        assume_yes=args.yes,
+    )
+    rc = branch.exit_code(r)
+    if r["status"] == "precondition":
+        _print(r["error"], file=sys.stderr)
+        print("BRANCH: PRECONDITION")
+        return rc
+
+    print(f"repo={r['repo_dir']} branch={r['branch']} base={r['base']} "
+          f"({r['base_source']}) tip={(r['branch_sha'] or '')[:7]}")
+    _branch_steps(r["steps"])
+    if r["skipped"]:
+        print(f"already done: {', '.join(r['skipped'])}")
+    if r.get("note"):
+        _print(r["note"], file=sys.stderr)
+    if r.get("error"):
+        _print(r["error"], file=sys.stderr)
+
+    pr = r.get("pr") or {}
+    subject = f"{r['branch']} -> {r['base']}"
+    number = f" (pr #{pr['number']})" if pr.get("number") else ""
+    print(f"BRANCH: {_BRANCH_VERDICTS.get(r['status'], 'FAILED')} {subject}{number}")
+    return rc
+
+
+def _locate_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `java locate`.
+
+    Args:
+        parser: the parser to declare them on
+    """
+    parser.add_argument("name")
+
+
+def _reorder_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `java reorder`.
+
+    Args:
+        parser: the parser to declare them on
+    """
+    parser.add_argument("paths", nargs="+")
+    parser.add_argument("--check", action="store_true")
+
+
+def _docs_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `java docs`.
+
+    Args:
+        parser: the parser to declare them on
+    """
+    parser.add_argument("paths", nargs="+")
+    parser.add_argument("--fix", action="store_true")
+    parser.add_argument("--scope", default="all", choices=["class", "method", "field", "all"])
+    parser.add_argument("--prefix", action="append", default=[],
+                        help="extra FQN top-level prefix (repeatable)")
+
+
+def _modules_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `gradle modules`, which takes none.
+
+    Args:
+        parser: the parser to declare them on
+    """
+
+
+def _verify_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `gradle verify`.
+
+    Args:
+        parser: the parser to declare them on
+    """
+    parser.add_argument("module")
+    parser.add_argument("tasks", nargs="*")
+    parser.add_argument("--tail", type=int, default=25)
+    parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument("--rerun", action="store_true",
+                        help="force re-execution past up-to-date + build cache (--rerun-tasks)")
+
+
+def _tally_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `gradle tally`.
+
+    Args:
+        parser: the parser to declare them on
+    """
+    parser.add_argument("module")
+    parser.add_argument("--fails", type=int, default=15)
+
+
+# The grouped subcommands, as (group, name, deprecated spelling, help, argument
+# shape, handler). The group marks WHO CAN USE the command rather than what it
+# parses - a gradle project that carries no Java source cannot use `java docs`,
+# and a Java tree with no gradle build cannot use `gradle verify` - so a new
+# subcommand belongs under the umbrella naming what it needs to exist.
+#
+# The argument shape is a function because each is declared twice, once under
+# the group and once under the deprecated top-level spelling, and two hand-kept
+# copies of a flag list drift.
+_Configure = Callable[[argparse.ArgumentParser], None]
+_Handler = Callable[[argparse.Namespace], int]
+_GROUPED_COMMANDS: tuple[tuple[str, str, str, str, _Configure, _Handler], ...] = (
+    ("java", "locate", "locate", "find a class file by name across module sources",
+     _locate_args, _cmd_locate),
+    ("java", "reorder", "reorder", "reorder Java imports to the IntelliJ Default layout",
+     _reorder_args, _cmd_reorder),
+    ("java", "docs", "javadoc", "audit or --fix javadocs", _docs_args, _cmd_docs),
+    ("gradle", "modules", "modules", "print the cached module inventory",
+     _modules_args, _cmd_modules),
+    ("gradle", "verify", "verify", "module-scoped gradle gate", _verify_args, _cmd_verify),
+    ("gradle", "tally", "tally", "JUnit result tally", _tally_args, _cmd_tally),
+)
+
+
+def _deprecation_notice(old: str, new: str) -> None:
+    """Names the current spelling of a subcommand a deprecated one just ran.
+
+    The notice goes to stderr, as every other piece of commentary here does, so
+    a piped stdout carries only what the command itself printed.
+
+    Args:
+        old: the deprecated spelling that was invoked
+        new: the spelling to use instead
+    """
+    print(f"toolsmith: `toolsmith {old}` is deprecated - use `toolsmith {new}`",
+          file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="toolsmith",
                                      description="Java workspace dev tools + MCP server.")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # The metavar is the surface: the deprecated spellings are registered on the
+    # same subparsers and would otherwise be listed in the usage line.
+    sub = parser.add_subparsers(dest="cmd", required=True,
+                                metavar="{setup,serve,java,gradle,jitpack,branch}")
 
     s = sub.add_parser("setup", help="scan a workspace and cache its module inventory")
     s.add_argument("root", nargs="?", default=".", help="workspace root to scan (default: cwd)")
     s.set_defaults(func=_cmd_setup)
 
     sub.add_parser("serve", help="run the stdio MCP server").set_defaults(func=_cmd_serve)
-    sub.add_parser("modules", help="print the cached module inventory").set_defaults(func=_cmd_modules)
 
-    s = sub.add_parser("verify", help="module-scoped gradle gate")
-    s.add_argument("module")
-    s.add_argument("tasks", nargs="*")
-    s.add_argument("--tail", type=int, default=25)
-    s.add_argument("--compile-only", action="store_true")
-    s.add_argument("--rerun", action="store_true",
-                   help="force re-execution past up-to-date + build cache (--rerun-tasks)")
-    s.set_defaults(func=_cmd_verify)
-
-    s = sub.add_parser("tally", help="JUnit result tally")
-    s.add_argument("module")
-    s.add_argument("--fails", type=int, default=15)
-    s.set_defaults(func=_cmd_tally)
-
-    s = sub.add_parser("reorder", help="reorder Java imports to the IntelliJ Default layout")
-    s.add_argument("paths", nargs="+")
-    s.add_argument("--check", action="store_true")
-    s.set_defaults(func=_cmd_reorder)
-
-    s = sub.add_parser("javadoc", help="audit or --fix javadocs")
-    s.add_argument("paths", nargs="+")
-    s.add_argument("--fix", action="store_true")
-    s.add_argument("--scope", default="all", choices=["class", "method", "field", "all"])
-    s.add_argument("--prefix", action="append", default=[], help="extra FQN top-level prefix (repeatable)")
-    s.set_defaults(func=_cmd_javadoc)
-
-    s = sub.add_parser("locate", help="find a class file by name across module sources")
-    s.add_argument("name")
-    s.set_defaults(func=_cmd_locate)
+    groups = {
+        "java": sub.add_parser(
+            "java", help="tools that act on Java source",
+            description="Commands that read or rewrite Java source files.",
+        ).add_subparsers(dest="action", required=True, metavar="{locate,reorder,docs}"),
+        "gradle": sub.add_parser(
+            "gradle", help="tools that act on a gradle build",
+            description="Commands that need a gradle build to run against.",
+        ).add_subparsers(dest="action", required=True, metavar="{modules,verify,tally}"),
+    }
+    for group, name, old, help_text, configure, handler in _GROUPED_COMMANDS:
+        current = groups[group].add_parser(name, help=help_text)
+        configure(current)
+        current.set_defaults(func=handler)
+        # The deprecated top-level spelling runs the same handler. It carries no
+        # help, which is what keeps it out of `--help`: argparse renders a
+        # SUPPRESS help as the literal "==SUPPRESS==" for a subparser, where an
+        # absent one registers no help entry at all.
+        deprecated = sub.add_parser(old)
+        configure(deprecated)
+        deprecated.set_defaults(func=handler, moved_from=(old, f"{group} {name}"))
 
     # One parser per action rather than one shared flag set: --force and
     # --allow-symbolic only mean anything to build, and a shared parser accepted
@@ -579,11 +750,50 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("artifact", help="the artifact whose sha is changing")
     a.set_defaults(func=_jitpack_order)
 
+    # CLI only, and deliberately not an MCP tool: finish pushes, opens a pull
+    # request and merges it, so it stays something a human invokes.
+    s = sub.add_parser("branch", help="end-of-branch rituals against git and gh",
+                       description="Branch-level operations that reach the remote. Human "
+                                   "invoked: none of this is exposed as an MCP tool.")
+    actions = s.add_subparsers(dest="action", required=True, metavar="{finish}")
+
+    a = actions.add_parser("finish", help="push, open a pull request, merge it, clean up",
+                           description="Runs the whole end-of-branch ritual and resumes "
+                                       "whatever part of it already ran. Merges with a merge "
+                                       "commit: commits here are often independently gated "
+                                       "units, and a squash destroys the per-commit revert "
+                                       "granularity that gating produced.")
+    a.add_argument("--title", default=None,
+                   help="pull request title (default: the branch's last commit subject)")
+    a.add_argument("--body-file", default=None, metavar="FILE",
+                   help="file to use as the pull request body (default: one composed from "
+                        "the branch's commit subjects and written to a temp file)")
+    a.add_argument("--base", default=None, metavar="BRANCH",
+                   help="base branch, overriding detection from origin's head and gh")
+    a.add_argument("--delete-remote", action="store_true",
+                   help="also delete the remote branch; deleting it is a separate decision "
+                        "from cleaning up locally")
+    a.add_argument("--no-merge", action="store_true",
+                   help="push and open the pull request, then stop, for when review is wanted")
+    a.add_argument("--dry-run", action="store_true",
+                   help="print the ordered plan and mutate nothing")
+    a.add_argument("--yes", action="store_true",
+                   help="merge without asking; required when stdin is not a terminal, since "
+                        "a merge is outward-facing and effectively irreversible")
+    a.add_argument("--squash", action="store_true",
+                   help="refused - see the merge method in this command's description")
+    a.add_argument("--rebase", action="store_true",
+                   help="refused - see the merge method in this command's description")
+    a.set_defaults(func=_branch_finish)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    moved = getattr(args, "moved_from", None)
+    if moved is not None:
+        _deprecation_notice(*moved)
     return args.func(args)
 
 

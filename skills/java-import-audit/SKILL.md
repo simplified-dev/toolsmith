@@ -1,6 +1,6 @@
 ---
 name: java-import-audit
-description: Audit Java imports for wildcard usage, unused imports, and FQN javadoc refs that should be imported. Auto-invoked when the user asks to "clean up imports", "audit imports", "find wildcard imports", or before a commit that touched many `.java` files. Routes to IntelliJ MCP `get_file_problems` for unused-import detection (uses the IDE's own inspection) and `search_regex` for wildcard pattern discovery. Defers FQN-in-javadoc handling to `javadoc-normalize` (which already auto-imports).
+description: Audit Java imports for wildcard usage, unused imports, and FQN javadoc refs that should be imported. Auto-invoked when the user asks to "clean up imports", "audit imports", "find wildcard imports", or before a commit that touched many `.java` files. Routes to IntelliJ MCP `get_file_problems` for unused-import detection (uses the IDE's own inspection) and `search_regex` for wildcard pattern discovery. Defers FQN-in-javadoc handling to `java-docs-normalize` (which already auto-imports).
 auto_invoke: true
 tags: [java, imports, audit, cleanup, mcp, intellij]
 ---
@@ -29,7 +29,7 @@ hit Ctrl+Alt+O. The skill is for batch / pre-commit / cross-module checks.
 | Find wildcard imports project-wide | `mcp__IntelliJ_IDE__search_regex` | Pattern: `^import\s+(?:static\s+)?[\w.]+\.\*;` |
 | Find unused imports in one file | `mcp__IntelliJ_IDE__get_file_problems` | Returns IntelliJ's `UnusedImport` inspection results without running a full project scan |
 | Find unused imports across module | `mcp__IntelliJ_IDE__build_project` then filter for unused-import warnings | Or run `./gradlew :module:compileJava` with `-Werror` and scan the output |
-| Find inline FQN javadoc refs | `javadoc-normalize` with `--fix` | Handles `{@link a.b.c.X}` -> `import a.b.c.X; {@link X}` atomically; flags conflicts as `fqn-skip` |
+| Find inline FQN javadoc refs | `java-docs-normalize` with `--fix` | Handles `{@link a.b.c.X}` -> `import a.b.c.X; {@link X}` atomically; flags conflicts as `fqn-skip` |
 | Find files importing FQN `a.b.c.X` | `mcp__IntelliJ_IDE__search_regex` | Pattern: `^import\s+a\.b\.c\.X;` (covered by `java-symbol-search` too) |
 
 ## Wildcard imports
@@ -55,9 +55,9 @@ Do NOT use a regex sweep for unused imports - false positives are
 guaranteed (reflective uses, javadoc refs, annotation processors, generated
 code).
 
-## FQN-in-javadoc - defer to `javadoc-normalize`
+## FQN-in-javadoc - defer to `java-docs-normalize`
 
-The `fqn-auto-import` rule in `javadoc-normalize` already handles
+The `fqn-auto-import` rule in `java-docs-normalize` already handles
 `{@link a.b.c.X}` -> `import a.b.c.X;` + `{@link X}` atomically. It also
 flags conflicts (`fqn-skip`) when the simple name clashes with a local
 declaration or existing import. Calling that skill is the right entry point
@@ -69,7 +69,7 @@ for any FQN-in-javadoc audit; do not duplicate the logic here.
    - report N wildcard imports, list top files.
 2. For each file in scope, `mcp__IntelliJ_IDE__get_file_problems` to surface
    unused imports. Aggregate and report.
-3. If the same files also have FQN javadoc refs, route to `javadoc-normalize`
+3. If the same files also have FQN javadoc refs, route to `java-docs-normalize`
    instead of fixing inline.
 
 ## Fallback

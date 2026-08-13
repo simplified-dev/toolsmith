@@ -1,11 +1,11 @@
 ---
-name: jmh-regression-gate
-description: Compare a JMH benchmark run against a baseline and halt when any benchmark regresses beyond a configurable threshold. Auto-invoked when a plan or session has captured paired JMH outputs (typically `baseline-*.txt` / `final-*.txt` from `./gradlew jmh > file.txt`) and needs a go / no-go signal before advancing. Threshold defaults to 2% regression; configurable via `--threshold`. Reads gradle-stdout JMH summary tables and JMH `--rf json` output; never re-runs the benchmarks. Halt is advisory - the gate exits non-zero and surfaces the worst regressions, but the user decides whether to bisect or accept.
+name: java-jmh-regression-gate
+description: Gate a Java benchmark change - compare a JMH run of Java benchmarks against a baseline, reading Gradle's JMH output, and halt when any benchmark regresses beyond a configurable threshold. Auto-invoked when a plan or session has captured paired JMH outputs (typically `baseline-*.txt` / `final-*.txt` from `./gradlew jmh > file.txt`) and needs a go / no-go signal before advancing. Threshold defaults to 2% regression; configurable via `--threshold`. Reads gradle-stdout JMH summary tables and JMH `--rf json` output; never re-runs the benchmarks. Halt is advisory - the gate exits non-zero and surfaces the worst regressions, but the user decides whether to bisect or accept.
 auto_invoke: true
 tags: [java, jmh, benchmark, regression, verification]
 ---
 
-# jmh-regression-gate
+# java-jmh-regression-gate
 
 Compare two JMH runs and halt on regressions past a threshold. Mirrors the
 `gradle-verify-gate` shape: skill describes routing, helper script does the
@@ -39,7 +39,7 @@ yet. Skip when only one JMH file exists.
 ## Standard invocation
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/skills/jmh-regression-gate/compare.py" BASELINE CANDIDATE
+python "${CLAUDE_PLUGIN_ROOT}/skills/java-jmh-regression-gate/compare.py" BASELINE CANDIDATE
 ```
 
 `BASELINE` and `CANDIDATE` may be:
@@ -111,8 +111,8 @@ script normalizes by (Benchmark, Mode, Params) tuple and ignores ordering.
 `gradle-verify-gate` covers `compileJava` + `test`. This gate is the
 benchmark-equivalent for JMH-heavy refactors (see `concurrent-perf-*.md`
 plans). The two are complementary - run `gradle-verify-gate` first to
-confirm the code compiles and unit-tests pass, then `jmh-regression-gate` to
-confirm the change did not regress benchmark scores.
+confirm the code compiles and unit-tests pass, then `java-jmh-regression-gate`
+to confirm the change did not regress benchmark scores.
 
 ## Invariants
 

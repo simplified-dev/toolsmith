@@ -53,7 +53,7 @@ this order:
   name.
 
 Text-mechanics rules (block form, hyphen style, tag policing) live in
-`javadoc-normalize` - do not restate them here.
+`java-docs-normalize` - do not restate them here.
 
 ## Template - Root exception (extends RuntimeException)
 
@@ -213,7 +213,7 @@ When applying the template, replace:
   annotation placement). The IDE's `reformat_file` reads the live settings -
   no other formatter does. Skip `google-java-format`, Spotless, and IntelliJ
   headless; all impose their own style.
-- Do NOT re-run `javadoc-normalize` on the generated file. Templates already
+- Do NOT re-run `java-docs-normalize` on the generated file. Templates already
   conform to the CLAUDE.md `## Javadoc` rules; running normalize is a no-op at
   best and risks spurious flags.
 - Invoke `gradle-verify-gate` after dropping the new class into the project

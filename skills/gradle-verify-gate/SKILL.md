@@ -1,6 +1,6 @@
 ---
 name: gradle-verify-gate
-description: Run the standard Java verification gate (`./gradlew compileJava test`) after a refactor phase, file rename, or exception migration. Auto-invoked after `java-bulk-rename`, after `java-exception-class-gen` drops a new file, after Edit batches touching `.java` files, or whenever a multi-phase plan declares a `Phase N -> verify` boundary. Prefers module-scoped `./gradlew :module:compileJava :module:test` over full `./gradlew build`; surfaces only the first failure cleanly; skips redundant re-runs when nothing has changed.
+description: Run the standard Gradle verification gate (`./gradlew compileJava test`) over a Gradle module after a refactor phase, file rename, or exception migration. Auto-invoked after `java-bulk-rename`, after `java-exception-class-gen` drops a new file, after Edit batches touching `.java` files, or whenever a multi-phase plan declares a `Phase N -> verify` boundary. Prefers module-scoped `./gradlew :module:compileJava :module:test` over full `./gradlew build`; surfaces only the first failure cleanly; skips redundant re-runs when nothing has changed.
 auto_invoke: true
 tags: [java, gradle, build, verification, ci]
 ---

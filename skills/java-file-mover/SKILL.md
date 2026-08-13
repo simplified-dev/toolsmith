@@ -1,6 +1,6 @@
 ---
 name: java-file-mover
-description: Move, relocate, or rename a Java file across packages, directories, or modules with imports, package statement, git history, and dependent references all updated. Auto-invoked when the user says "move X to package Y", "relocate X", "put X in module Z", "move this class into <pkg>", "rename class X" (dir-changing), or before Claude hand-runs `git mv`/`mv` on a `.java` file. Routes type-aware work to IntelliJ `mcp__IntelliJ_IDE__rename_refactoring`; falls back to a deterministic git-mv + package-rewrite + import-fix + reorder pipeline when the IDE is not attached. Delegates symbol discovery to `java-symbol-search`/`java-find-usages`, import reorder to `toolsmith reorder`, javadoc/FQN fixes to `javadoc-normalize`, and the compile gate to `gradle-verify-gate`.
+description: Move, relocate, or rename a Java file across packages, directories, or modules with imports, package statement, git history, and dependent references all updated. Auto-invoked when the user says "move X to package Y", "relocate X", "put X in module Z", "move this class into <pkg>", "rename class X" (dir-changing), or before Claude hand-runs `git mv`/`mv` on a `.java` file. Routes type-aware work to IntelliJ `mcp__IntelliJ_IDE__rename_refactoring`; falls back to a deterministic git-mv + package-rewrite + import-fix + reorder pipeline when the IDE is not attached. Delegates symbol discovery to `java-symbol-search`/`java-find-usages`, import reorder to `toolsmith java reorder`, javadoc/FQN fixes to `java-docs-normalize`, and the compile gate to `gradle-verify-gate`.
 auto_invoke: true
 tags: [java, move, relocate, rename, refactor, git-mv, imports, mcp, intellij]
 ---
@@ -258,7 +258,7 @@ IDE-absent fallback.
 For adding imports (cases 2-4) do not hand-place the line in sorted position -
 add it anywhere in the import block and let the reorder step below sort it. For
 FQN refs that appear in **javadoc** rather than code, route to
-`toolsmith javadoc --fix` (it auto-imports and simplifies) instead of editing by
+`toolsmith java docs --fix` (it auto-imports and simplifies) instead of editing by
 hand.
 
 ## The reorder + reformat + verify tail (every case ends here)
@@ -271,9 +271,9 @@ way:
    fully faithful ordering. IDE absent → the bundled reorderer, which reproduces
    the IntelliJ Default layout byte-for-byte (see DRAFT-import-order.md):
    ```bash
-   toolsmith reorder FILE [FILE...]
+   toolsmith java reorder FILE [FILE...]
    # or gate a whole subtree without writing:
-   toolsmith reorder --check "$mod/src"
+   toolsmith java reorder --check "$mod/src"
    ```
    It is idempotent, preserves CRLF/LF and the trailing newline, never touches
    the package statement or leading comments, preserves wildcards verbatim, and
@@ -283,7 +283,7 @@ way:
 
 2. **Reformat.** Only when the IDE is attached and indentation may have drifted
    (fallback `sed`/manual edits): `mcp__IntelliJ_IDE__reformat_file` per path.
-   `toolsmith reorder` already leaves import lines canonical, so skip a
+   `toolsmith java reorder` already leaves import lines canonical, so skip a
    separate reformat when the IDE is not available.
 
 3. **Verify.** Invoke `gradle-verify-gate`:
@@ -333,18 +333,18 @@ This skill orchestrates; it does not re-implement its neighbors.
 |---|---|---|
 | Discover importers / callers of the moved type | `java-find-usages`, `java-symbol-search` | AST search |
 | Rename the type identifier (Case A) | `java-bulk-rename` | identifier rewrite |
-| Sort the import block after edits | bundled `reorder_imports.py` (IDE-absent) or `mcp__IntelliJ_IDE__reformat_file` | ordering algorithm |
-| FQN refs in **javadoc** on the moved type | `javadoc-normalize --fix` | javadoc auto-import |
+| Sort the import block after edits | `toolsmith java reorder` (IDE-absent) or `mcp__IntelliJ_IDE__reformat_file` | ordering algorithm |
+| FQN refs in **javadoc** on the moved type | `java-docs-normalize --fix` | javadoc auto-import |
 | Leftover unused / wildcard imports | `java-import-audit` | unused detection |
 | Compile + test gate | `gradle-verify-gate` | build invocation |
 
 Canonical pipeline (IDE-absent, cross-package move):
 
 `java-find-usages` → (git mv | git rm+add) + package rewrite → import mechanics
-#1-4 → `toolsmith reorder` → `gradle-verify-gate` → (user commits).
+#1-4 → `toolsmith java reorder` → `gradle-verify-gate` → (user commits).
 
 The reorderer is not a separate script bundled here; it is the plugin's own
-`toolsmith reorder` CLI (IDE-independent, no network). The tested implementation is
+`toolsmith java reorder` CLI (IDE-independent, no network). The tested implementation is
 `Simplified-Dev/toolsmith/src/toolsmith/imports.py` (also exposed as the toolsmith
-`reorder_imports` MCP tool) - re-copy from there when it changes.
+`java_reorder_imports` MCP tool) - re-copy from there when it changes.
 

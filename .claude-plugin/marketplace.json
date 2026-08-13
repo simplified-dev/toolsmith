@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "toolsmith",
-      "description": "Java workspace dev tools: module discovery, gradle verify, JUnit tally, IntelliJ-faithful import reorder, javadoc normalize, and Java refactor / move / audit skills.",
+      "description": "Java workspace dev tools: gradle_* tools for a gradle module (discovery, verify, JUnit tally), java_* tools for Java source (IntelliJ-faithful import reorder, javadoc normalize), and Java refactor / move / audit skills.",
       "source": "./",
       "category": "development"
     }
