@@ -119,6 +119,35 @@ _CONFLICT_NOTE = ("strictly() is gradle's hardest constraint, so two different p
                   "artifact in a single graph is a resolution failure, not 'newest wins'")
 _GIT_REMEDY = "git remote add origin <url> && git push -u origin master"
 
+# The one thing a cascade may not claim. Published gradle module metadata for
+# these artifacts records {"requires": "<sha>"} - NOT strictly - so an inherited
+# pin is a soft constraint and a consumer's own strictly() overrides it. Nothing
+# forces the far end of a chain to move; converging on one sha per artifact is
+# this workspace's convention, and `order` says so rather than implying gradle
+# demands it.
+_SOFT_PIN_NOTE = ("an inherited pin is published as 'requires', not 'strictly', so a consumer's "
+                  "own strictly() overrides it - a full cascade is this workspace's "
+                  "one-sha-per-artifact convention, not a resolution requirement")
+_CASCADE_NOTE = ("each step lands downstream only once that module is committed, built on "
+                 "jitpack and re-pinned by its own consumers")
+_SNAPSHOT_SKIP_NOTE = ("a -SNAPSHOT coordinate floats onto the new commit by itself, so it is "
+                       "left alone; pass --include-snapshots to nail it to this sha instead")
+_UNVERIFIED_NOTE = ("nothing was written - jitpack could not be asked whether the sha is built; "
+                    "re-run, or pass --no-verify to pin it anyway")
+_STALE_SCAN_NOTE = "the file changed between the scan and the write - re-run"
+
+# Forms whose pin text can be rewritten in place. "unpinned" is deliberately
+# absent: a coordinate naming no version has no pin text to replace, and
+# inventing one would change the declaration's shape rather than its sha.
+_REWRITABLE_FORMS = frozenset({"strictly", "version", "snapshot"})
+
+# A hex sha is cut to the same CONSTANT 7 every other path here uses. Each
+# distinct prefix length is a SEPARATE jitpack build, so pinning 8 or 40 chars
+# asks for an artifact nobody produced - and _resolve_ref reports on the 7-char
+# form regardless, so an unnormalised pin would be verified at a length it was
+# never going to be written at.
+_ABBREVIABLE_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+
 # Status codes meaning the list did not answer, as opposed to answering "none".
 # 429 is the one that actually bites - `pins` issues one list call per artifact
 # back to back - but a 5xx is just as much a non-answer. A 404 is deliberately
@@ -1172,15 +1201,25 @@ def _scan_pins(artifact: str | None = None) -> list[dict]:
 
     Both dialects in use are recognised: the library form
     ``api("com.github.<org>:<artifact>") { version { strictly("<sha>") } }`` and
-    the app form ``api("com.github.<org>:<artifact>:master-SNAPSHOT")``. Neither
-    is rewritten - picking a side is a human decision about the ecosystem.
+    the app form ``api("com.github.<org>:<artifact>:master-SNAPSHOT")``. Which
+    one a site uses is a human decision about the ecosystem, so jitpack_set
+    edits the pin inside whichever form it finds and never converts between them.
+
+    Each occurrence carries the exact character span of its pin text, which is
+    what makes a rewrite an offset splice rather than a regex substitution: the
+    artifact id never reaches a pattern, so an id holding a regex metacharacter
+    (``gson-extras``, and ``.`` is legal here too) cannot alter what matches, and
+    a declaration this function did not find cannot be silently edited by one.
 
     Args:
         artifact: case-insensitive substring filter on the artifact id.
 
     Returns:
         One dict per occurrence with group, org, artifact, pin, form, central,
-        file and line.
+        file, line, module (the discovered module the file belongs to, None for
+        the workspace root), path (the absolute file path) and span (the
+        character offsets of the pin text within that file, None when the
+        coordinate names no version at all).
     """
     root = workspace_root()
     if root is None:
@@ -1188,22 +1227,32 @@ def _scan_pins(artifact: str | None = None) -> list[dict]:
 
     occurrences: list[dict] = []
     seen: set[str] = set()
-    for directory in [root, *(root / m["path"] for m in get_modules())]:
+    sources = [(None, root), *((m["name"], root / m["path"]) for m in get_modules())]
+    for module, directory in sources:
         for name in ("build.gradle.kts", "build.gradle"):
             path = directory / name
             if str(path) in seen or not path.is_file():
                 continue
             seen.add(str(path))
             try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                # newline="" and keepends=True together are what make an offset
+                # here mean the same thing on disk. Universal-newline decoding
+                # collapses \r\n to \n, so every span in a CRLF file would point
+                # one byte earlier per preceding line, and writing such a text
+                # back would silently re-encode the whole file to LF.
+                text = path.read_text(encoding="utf-8", errors="replace", newline="")
             except OSError:
                 continue
+            lines = text.splitlines(keepends=True)
             try:
                 label = path.relative_to(root).as_posix()
             except ValueError:
                 label = path.as_posix()
 
+            offset = 0
             for index, line in enumerate(lines):
+                start = offset
+                offset += len(line)
                 match = _COORD_RE.search(line)
                 if match is None:
                     continue
@@ -1214,12 +1263,19 @@ def _scan_pins(artifact: str | None = None) -> list[dict]:
                 if version:
                     pin = version
                     form = "snapshot" if version.endswith("-SNAPSHOT") else "version"
+                    span = (start + match.start("version"), start + match.end("version"))
                 else:
                     # The strictly block usually sits on the same line, but a
-                    # wrapped declaration puts it on the next few.
-                    window = "\n".join(lines[index:index + 4])
+                    # wrapped declaration puts it on the next few. Joining with
+                    # nothing keeps the window's offsets equal to the file's,
+                    # since keepends already carried each terminator along.
+                    window = "".join(lines[index:index + 4])
                     strict = _STRICTLY_RE.search(window)
-                    pin, form = (strict.group(1), "strictly") if strict else ("", "unpinned")
+                    if strict is None:
+                        pin, form, span = "", "unpinned", None
+                    else:
+                        pin, form = strict.group(1), "strictly"
+                        span = (start + strict.start(1), start + strict.end(1))
                 group = match.group("group")
                 occurrences.append({
                     "group": group,
@@ -1230,6 +1286,9 @@ def _scan_pins(artifact: str | None = None) -> list[dict]:
                     "central": group.startswith("io.github."),
                     "file": label,
                     "line": index + 1,
+                    "module": module,
+                    "path": str(path),
+                    "span": span,
                 })
     return occurrences
 
@@ -1428,4 +1487,586 @@ def jitpack_pins(artifact: str | None = None, max_behind: int | None = None,
     if not rows:
         result["note"] = (f"no jitpack pins found under {root}"
                           + (f" matching '{artifact}'" if artifact else ""))
+    return result
+
+
+def _line_at(text: str, offset: int) -> tuple[int, int, int]:
+    """Locates the line holding a character offset.
+
+    Args:
+        text: the whole file, decoded with newline translation OFF.
+        offset: a character offset into it.
+
+    Returns:
+        (1-based line number, start offset, end offset), where the end excludes
+        the terminator. A CRLF file leaves the \\r inside the slice, so a caller
+        rendering the line strips it rather than assuming \\n.
+    """
+    start = text.rfind("\n", 0, offset) + 1
+    end = text.find("\n", offset)
+    return text.count("\n", 0, start) + 1, start, len(text) if end < 0 else end
+
+
+def _site_ref(site: dict) -> dict:
+    """The identifying half of an occurrence, for a report that changes nothing."""
+    return {"file": site["file"], "line": site["line"], "module": site["module"],
+            "form": site["form"], "pin": site["pin"]}
+
+
+def _rewrite_file(path: Path, sites: list[dict], sha: str,
+                  write: bool) -> tuple[list[dict], str | None]:
+    """Renders, and optionally applies, every planned edit in one file.
+
+    The file is read AGAIN here rather than trusted from the scan, and each
+    recorded span is checked to still hold the pin the scan saw. A splice at a
+    stale offset would corrupt a coordinate rather than fail, so a file that
+    moved between the two reads is refused instead of edited. Decoding is
+    strict for the same reason: errors="replace" is fine for reporting, but
+    writing a replaced text back would burn U+FFFD into the file.
+
+    Edits are applied right to left so each earlier span keeps its offsets, and
+    the whole file is written once - a file with nothing to change is not
+    rewritten at all.
+
+    Args:
+        path: the build file to edit.
+        sites: occurrences in this file, each carrying a span.
+        sha: the pin text to write.
+        write: whether to write; False renders the same entries and touches
+            nothing.
+
+    Returns:
+        (entries, error). Each entry carries file, module, line (the line the
+        pin is on), decl_line (the coordinate's own line, which differs for a
+        wrapped declaration), form, pin, before, after and changed. An error
+        yields no entries, because nothing about the file could be established.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", newline="")
+    except (OSError, UnicodeDecodeError) as exc:
+        return [], f"cannot read '{path}': {exc}"
+
+    entries: list[dict] = []
+    edits: list[tuple[int, int, str]] = []
+    for site in sites:
+        start, end = site["span"]
+        if text[start:end] != site["pin"]:
+            return [], f"{_STALE_SCAN_NOTE} ('{site['file']}' line {site['line']})"
+        number, line_start, line_end = _line_at(text, start)
+        if end > line_end:
+            # A pin literal spanning a line break is not something any dialect
+            # here produces, and splicing one would rewrite the wrong slice.
+            return [], (f"pin at '{site['file']}' line {number} spans a line break - "
+                        f"edit it by hand")
+        changed = site["pin"] != sha
+        entries.append({
+            "file": site["file"], "module": site["module"], "line": number,
+            "decl_line": site["line"], "form": site["form"], "pin": site["pin"],
+            "before": text[line_start:line_end].rstrip("\r"),
+            "after": (text[line_start:start] + sha + text[end:line_end]).rstrip("\r"),
+            "changed": changed,
+        })
+        if changed:
+            edits.append((start, end, sha))
+
+    if write and edits:
+        for start, end, replacement in sorted(edits, reverse=True):
+            text = text[:start] + replacement + text[end:]
+        try:
+            path.write_text(text, encoding="utf-8", newline="")
+        except OSError as exc:
+            return entries, f"cannot write '{path}': {exc}"
+    return entries, None
+
+
+def _verify_pin(artifact: str, sha: str, timeout: float) -> dict:
+    """Asks whether a sha is built BEFORE it is written into a build file.
+
+    Read-only twice over: jitpack_status reads the versionless build list and
+    triggers nothing, and it validates the ref against the publishing repo's
+    local git first - which is what catches the sha that was never pushed, the
+    failure a hand-rolled sed cannot see at all.
+
+    The module token is the repo DIRECTORY rather than a name, because the
+    artifact id is the git remote's repo segment and need not match any module
+    name (minecraft-text publishes minecraft-library/text).
+
+    Args:
+        artifact: the artifact id being pinned.
+        sha: the pin about to be written.
+        timeout: seconds before the list read is abandoned.
+
+    Returns:
+        dict with ok, ref (the 7-char sha the request actually resolved to, or
+        None), state, status, repo, list_ok and error. state is "unpublished"
+        when no workspace repo publishes the artifact, so the question cannot be
+        asked here at all - which is a reason to stop, not a reason to write.
+    """
+    repo_dir = _repo_dirs_by_artifact({artifact}).get(artifact)
+    if repo_dir is None:
+        return {"ok": False, "ref": None, "state": "unpublished", "list_ok": False,
+                "error": f"no repo in this workspace publishes '{artifact}', so its sha "
+                         f"cannot be checked here - pass --no-verify to pin it unchecked"}
+    report = jitpack_status(str(repo_dir), refs=[sha], timeout=timeout)
+    entry = (report.get("refs") or [{}])[0]
+    return {
+        "ok": bool(entry.get("ok")),
+        "ref": entry.get("ref"),
+        "state": entry.get("state") or "unresolved",
+        "status": entry.get("status"),
+        "repo": report.get("repo"),
+        "list_ok": report.get("list_ok", False),
+        "error": report.get("error") or entry.get("error"),
+    }
+
+
+def jitpack_set(artifact: str, sha: str, modules: Sequence[str] = (), check: bool = False,
+                verify: bool = True, include_snapshots: bool = False,
+                timeout: float = _LIST_TIMEOUT) -> dict:
+    """Rewrites one artifact's pin across the workspace build files.
+
+    The write counterpart of jitpack_pins, and the replacement for the
+    throwaway ``sed -i -E "s#(:$a\\") \\{ version \\{ strictly\\(\\")[a-f0-9]+...``
+    that a nine-module cascade was last driven by. Every defect of that script
+    is a rule here:
+
+      * It could not miss silently. A typo'd artifact matched nothing, printed
+        nothing and exited 0, and the news arrived days later as a build
+        resolving the old sha. Zero matches is an error carrying the artifact
+        ids that WERE found.
+      * It knew one dialect. The scan recognises the library
+        ``strictly(...)`` form, the app ``group:artifact:version`` form and a
+        ``strictly`` that wrapped onto a following line, and edits the pin
+        inside whichever it finds - never converting one into the other.
+      * It validated nothing. The sha is resolved in the publishing repo's
+        local git, checked to be pushed, and checked to be built on jitpack
+        before a byte is written.
+      * The artifact id was interpolated into a regex. Here it is compared with
+        ``==`` and the edit is an offset splice, so a metacharacter in an id
+        cannot widen what matches.
+
+    Matching is EXACT, unlike the substring filter jitpack_pins audits with: a
+    filter that over-matches shows you extra rows, while a rewrite that
+    over-matches edits the wrong artifact.
+
+    Args:
+        artifact: artifact id, optionally qualified as "<group>:<artifact>".
+            The qualified form is required when one id is pinned under more
+            than one group.
+        sha: the pin to write. Any hex sha is cut to 7 chars, the constant
+            every other path here uses, because each distinct prefix length is
+            a separate jitpack build. Under verification this may be any ref
+            local git can resolve - a branch, a tag, origin/master - and what
+            gets written is the 7-char sha it resolved to, so the version
+            checked and the version pinned are always the same one.
+        modules: module aliases, names or paths to narrow the edit to. Empty
+            means every module that pins the artifact.
+        check: report what would change and write nothing.
+        verify: confirm the sha is built on jitpack before writing.
+        include_snapshots: also nail ``-SNAPSHOT`` coordinates to the sha.
+            Off by default - they float onto the new commit by themselves, and
+            fixing one silently is a semantic change nobody asked for.
+        timeout: seconds before the verification list read is abandoned.
+
+    Returns:
+        dict with artifact, group, sha, check, changed, unchanged, skipped,
+        files (one entry per matched site: file, line, before, after, changed,
+        and the module/form/pin it belongs to), skipped_sites (every site NOT
+        edited, each with a reason), verification, ok and status - one of:
+
+          "written"     - the files were edited; ok
+          "checked"     - --check, so nothing was written; ok
+          "unchanged"   - every matched pin already held the sha; ok
+          "unbuilt"     - jitpack has no green build for the sha; nothing written
+          "unverified"  - jitpack could not be asked; nothing written
+          "write-failed"- a file could not be read back or written
+          "precondition"- nothing matched, or the request was unanswerable
+
+        "precondition" is exit-code-2 territory; every other non-ok status is
+        exit code 1.
+    """
+    base: dict = {"artifact": artifact, "sha": sha, "check": check, "changed": 0,
+                  "unchanged": 0, "skipped": 0, "files": [], "skipped_sites": []}
+
+    def stop(status: str, message: str, **extra) -> dict:
+        return {**base, **extra, "ok": False, "status": status, "error": message}
+
+    if workspace_root() is None:
+        return stop("precondition", "no inventory - run 'toolsmith setup' first")
+
+    # An unqualified id is the normal case; the group form exists so a name
+    # pinned under two orgs can be addressed at all.
+    qualifier, _sep, wanted = artifact.rpartition(":")
+    wanted, qualifier = wanted.strip(), (qualifier.strip() or None)
+    if not wanted:
+        return stop("precondition", f"'{artifact}' names no artifact")
+
+    target = sha.strip()
+    if _ABBREVIABLE_SHA_RE.fullmatch(target):
+        # Lowercased because jitpack keys its build records on the exact string.
+        target = target.lower()
+    truncated = len(target) > _SHA_LEN and _ABBREVIABLE_SHA_RE.fullmatch(target) is not None
+    if truncated:
+        target = target[:_SHA_LEN]
+    base["sha"] = target
+
+    sites = _scan_pins()
+    matches = [site for site in sites
+               if site["artifact"].lower() == wanted.lower()
+               and (qualifier is None or site["group"] == qualifier)]
+    if not matches:
+        # The dangerous failure of the script this replaces, turned into the
+        # loudest one available: the ids that DO exist are printed, so a typo
+        # is visible in the same breath.
+        found = sorted({site["artifact"] for site in sites})
+        near = sorted({name for name in found
+                       if wanted.lower() in name.lower() or name.lower() in wanted.lower()})
+        message = f"no workspace build file pins '{artifact}'"
+        if qualifier is not None and any(s["artifact"].lower() == wanted.lower() for s in sites):
+            message += f" under group '{qualifier}'"
+        if near:
+            message += f" - did you mean {', '.join(near)}?"
+        return stop("precondition", message, found=found, near=near)
+
+    groups = sorted({site["group"] for site in matches})
+    if len(groups) > 1:
+        return stop("precondition",
+                    f"'{wanted}' is pinned under {len(groups)} groups - qualify it as "
+                    f"{' or '.join(f'{g}:{wanted}' for g in groups)}", groups=groups)
+    group = groups[0]
+    base["group"] = group
+
+    if matches[0]["central"]:
+        # Maven Central publishes it, so it carries a released version and has
+        # no jitpack build to point a sha at.
+        return stop("precondition",
+                    f"'{wanted}' publishes to maven central as '{group}:{wanted}' - "
+                    f"a commit sha is not a version there")
+
+    if modules:
+        targets: dict[str, Path] = {}
+        unknown: list[str] = []
+        for token in modules:
+            directory = resolve_module(token)
+            if directory is None:
+                unknown.append(token)
+            else:
+                targets[token] = directory.resolve()
+        if unknown:
+            return stop("precondition",
+                        f"module(s) not resolved: {', '.join(unknown)} "
+                        f"(run 'toolsmith setup')")
+        narrowed = [site for site in matches
+                    if Path(site["path"]).parent.resolve() in set(targets.values())]
+        if not narrowed:
+            # Narrowing to nothing is the same silent no-op as a typo'd
+            # artifact, so it is the same error - naming who does pin it.
+            pinning = sorted({site["module"] or "<workspace root>" for site in matches})
+            return stop("precondition",
+                        f"none of the requested modules pin '{wanted}' - it is pinned by "
+                        f"{', '.join(pinning)}", pinned_by=pinning)
+        matches = narrowed
+
+    editable: list[dict] = []
+    skipped: list[dict] = []
+    for site in matches:
+        if site["span"] is None or site["form"] not in _REWRITABLE_FORMS:
+            skipped.append({**_site_ref(site),
+                            "reason": "the coordinate names no version to replace"})
+        elif site["form"] == "snapshot" and not include_snapshots:
+            skipped.append({**_site_ref(site), "reason": _SNAPSHOT_SKIP_NOTE})
+        else:
+            editable.append(site)
+    base["skipped_sites"] = skipped
+    base["skipped"] = len(skipped)
+    if not editable:
+        return stop("precondition",
+                    f"'{wanted}' matched {len(skipped)} declaration(s), none of them "
+                    f"rewritable - see skipped_sites")
+
+    verification = _verify_pin(wanted, target, timeout) if verify else None
+    resolved = None
+    if verification is not None and verification.get("ref") and verification["ref"] != target:
+        # What gets written is what was CHECKED. _resolve_ref reports on the
+        # 7-char form of whatever it was given, so writing the caller's spelling
+        # instead would verify one version and pin another - and it is what lets
+        # "origin/master" or a tag be passed here at all.
+        resolved, target = target, verification["ref"]
+    base["sha"] = target
+    blocked = verification is not None and not verification["ok"]
+
+    if not _is_segment(target):
+        # A pin becomes a url path segment downstream, so the charset is enforced
+        # on what would actually be WRITTEN, and only after a ref has had its
+        # chance to resolve: "origin/master" is a legal ref and an illegal pin,
+        # and gating the argument instead would refuse the useful half.
+        detail = f" ({verification['error']})" if blocked and verification.get("error") else ""
+        return stop("precondition",
+                    f"'{sha}' is not a usable version - letters, digits and . _ + - only"
+                    + detail, verification=verification)
+    if blocked:
+        state = verification["state"]
+        # An unresolvable or unpushed sha, and an artifact this workspace does
+        # not publish, are all the caller's question to answer - exit 2. A list
+        # that would not answer is jitpack's, and inconclusive is not a licence
+        # to write the pin either.
+        status = {"unresolved": "precondition", "unpublished": "precondition",
+                  "unreachable": "unverified"}.get(state, "unbuilt")
+    else:
+        status = "checked" if check else "written"
+
+    # The diff is rendered either way: under --check, and under a refusal, what
+    # WOULD change is the most useful thing left to report.
+    write = not check and not blocked
+    by_file: dict[str, list[dict]] = {}
+    for site in editable:
+        by_file.setdefault(site["path"], []).append(site)
+
+    files: list[dict] = []
+    errors: list[str] = []
+    for path_str, file_sites in sorted(by_file.items()):
+        entries, error = _rewrite_file(Path(path_str), file_sites, target, write)
+        files.extend(entries)
+        if error is None:
+            continue
+        errors.append(error)
+        # A file that could not be established never just disappears from the
+        # report; its sites move to the skipped list carrying the reason.
+        for site in file_sites:
+            if not any(entry["file"] == site["file"] and entry["decl_line"] == site["line"]
+                       for entry in entries):
+                skipped.append({**_site_ref(site), "reason": error})
+
+    changed = sum(1 for entry in files if entry["changed"])
+    if errors:
+        status, blocked = "write-failed", True
+    elif not blocked and changed == 0 and not check:
+        status = "unchanged"
+
+    notes = []
+    if truncated:
+        notes.append(f"sha cut to {_SHA_LEN} chars - each prefix length is a "
+                     f"separate jitpack build")
+    if resolved is not None:
+        notes.append(f"'{resolved}' resolved to '{target}', which is the version checked "
+                     f"and written")
+    if changed and not blocked:
+        notes.append(_CASCADE_NOTE)
+    if any(entry["form"] == "snapshot" for entry in files):
+        notes.append("a -SNAPSHOT coordinate was nailed to this sha and no longer floats")
+
+    result = {
+        **base,
+        "ok": not blocked,
+        "status": status,
+        "group": group,
+        "changed": changed,
+        "unchanged": len(files) - changed,
+        "skipped": len(skipped),
+        "files": files,
+        "files_touched": len({entry["file"] for entry in files if entry["changed"]}),
+        "skipped_sites": skipped,
+        "verification": verification,
+    }
+    if errors:
+        result["error"] = errors[0]
+        result["errors"] = errors
+    elif blocked:
+        result["error"] = verification["error"] or (
+            f"jitpack reports '{target}' as {verification['state']} for '{wanted}'")
+        if status == "unverified":
+            notes.insert(0, _UNVERIFIED_NOTE)
+    if notes:
+        result["note"] = "; ".join(notes)
+    return result
+
+
+def _publishers() -> dict[str, str]:
+    """Maps each discovered module NAME to the artifact its repo publishes.
+
+    The artifact comes from the git remote's repo segment and never from the
+    directory name - minecraft-text publishes minecraft-library/text. A module
+    nested inside another module's repo maps to THAT repo's artifact, because
+    its build file is committed and released as part of it, so a pin declared
+    there moves the enclosing artifact's sha.
+
+    Kept separate from _repo_dirs_by_artifact, which answers a narrow question
+    and stops early once it has: this one needs every module, and pays one git
+    call per repo rather than per module to get it.
+    """
+    root = workspace_root()
+    if root is None:
+        return {}
+    by_repo: dict[str, str | None] = {}
+    mapping: dict[str, str] = {}
+    for module in get_modules():
+        repo_dir = _walk_up_git(root / module["path"])
+        if repo_dir is None:
+            continue
+        key = str(repo_dir)
+        if key not in by_repo:
+            parsed = _parse_remote(_git(repo_dir, "config", "--get", "remote.origin.url") or "")
+            by_repo[key] = parsed[1] if parsed else None
+        if by_repo[key]:
+            mapping[module["name"]] = by_repo[key]
+    return mapping
+
+
+def _pin_graph() -> tuple[dict[str, set[str]], dict[str, list[dict]], dict[str, set[str]]]:
+    """Builds the artifact dependency graph from the workspace build files.
+
+    An edge runs from a pinned artifact to the artifact whose repo declares the
+    pin, so following edges is following the blast radius of a new sha.
+
+    Only FIXED pins carry an edge. A -SNAPSHOT consumer resolves the new commit
+    with no edit, so it never earns a commit of its own, so its own consumers
+    are not moved by this change - propagating through it would invent work.
+    Maven Central coordinates carry no edge either: they are not jitpack builds.
+
+    Returns:
+        (consumers by pinned artifact, fixed pin sites by consuming artifact,
+        floating consumers by pinned artifact).
+    """
+    publishes = _publishers()
+    consumers: dict[str, set[str]] = {}
+    sites_by: dict[str, list[dict]] = {}
+    floating: dict[str, set[str]] = {}
+    for site in _scan_pins():
+        consumer = publishes.get(site["module"])
+        if consumer is None or site["central"] or consumer == site["artifact"]:
+            continue
+        if site["form"] in ("strictly", "version"):
+            consumers.setdefault(site["artifact"], set()).add(consumer)
+            sites_by.setdefault(consumer, []).append(site)
+        elif site["form"] == "snapshot":
+            floating.setdefault(site["artifact"], set()).add(consumer)
+    return consumers, sites_by, floating
+
+
+def jitpack_order(artifact: str) -> dict:
+    """Lists what has to be re-pinned after an artifact's sha changes, in order.
+
+    The nine-module cascade this replaces was worked out by hand from ten
+    build.gradle.kts files. It is a graph walk: every artifact whose repo
+    declares a fixed pin on something already in the set joins it, and the
+    result is levelled so everything at depth N can be re-pinned as soon as
+    depth N-1 is built.
+
+    The two reasons a module appears are NOT the same strength, and the
+    difference rests on a measured fact: published gradle module metadata for
+    these artifacts records ``{"requires": "<sha>"}``, not ``strictly``. An
+    inherited pin is therefore SOFT and a consumer's own strictly() overrides
+    it, so nothing in gradle forces the far end of a chain to move.
+
+      "direct"   - the module declares a pin on <artifact> itself. Its own
+                   strictly() is the binding constraint, so leaving it stale
+                   means this module keeps building against the OLD code no
+                   matter what anything downstream says.
+      "cascade"  - the module only pins things that get a new sha because of
+                   this change. Re-pinning keeps the workspace on one sha per
+                   artifact, which is a convention here, not a requirement.
+
+    Ordering is deterministic (depth, then alphabetical) but not unique - any
+    topological order of the same graph is equally valid.
+
+    Args:
+        artifact: the artifact whose sha is changing.
+
+    Returns:
+        dict with artifact, order (one row per artifact to re-pin, each with
+        artifact, modules, depth, reason and repins - the concrete declaration
+        sites to edit), chain (the order as a flat list, the source first),
+        floating (consumers that track it with -SNAPSHOT and need no edit),
+        cycles, total, direct, cascade, note and ok. A source nobody pins and
+        nobody publishes sets a top-level error and is exit-code-2 territory.
+    """
+    if workspace_root() is None:
+        return {"ok": False, "status": "precondition", "artifact": artifact, "order": [],
+                "total": 0, "error": "no inventory - run 'toolsmith setup' first"}
+
+    source = artifact.rpartition(":")[2].strip()
+    consumers, sites_by, floating = _pin_graph()
+    publishes = _publishers()
+    modules_by: dict[str, list[str]] = {}
+    for module, published in sorted(publishes.items()):
+        modules_by.setdefault(published, []).append(module)
+
+    if source not in consumers and source not in modules_by:
+        known = sorted(set(consumers) | set(modules_by))
+        near = sorted(name for name in known
+                      if source.lower() in name.lower() or name.lower() in source.lower())
+        message = f"'{artifact}' is neither published nor pinned anywhere in this workspace"
+        if near:
+            message += f" - did you mean {', '.join(near)}?"
+        return {"ok": False, "status": "precondition", "artifact": source, "order": [],
+                "total": 0, "error": message, "known": known}
+
+    # The blast radius: everything whose repo declares a fixed pin on something
+    # already in the set.
+    reached = {source}
+    frontier = [source]
+    while frontier:
+        for consumer in sorted(consumers.get(frontier.pop(), ())):
+            if consumer not in reached:
+                reached.add(consumer)
+                frontier.append(consumer)
+
+    edges = {node: sorted(consumers.get(node, set()) & reached) for node in reached}
+    indegree = {node: 0 for node in reached}
+    for node, outgoing in edges.items():
+        for consumer in outgoing:
+            indegree[consumer] += 1
+
+    depth = dict.fromkeys(reached, 0)
+    ready = sorted(node for node, degree in indegree.items() if degree == 0)
+    chain: list[str] = []
+    while ready:
+        node = ready.pop(0)
+        chain.append(node)
+        for consumer in edges[node]:
+            depth[consumer] = max(depth[consumer], depth[node] + 1)
+            indegree[consumer] -= 1
+            if indegree[consumer] == 0:
+                ready.append(consumer)
+        # Depth first, then name: everything at one depth can be re-pinned as
+        # soon as the depth before it is built, and the name only breaks a tie
+        # so two runs agree.
+        ready.sort(key=lambda pending: (depth[pending], pending))
+    # A cycle leaves nodes with a residual indegree. Reporting them beats both
+    # looping and dropping them, since a pin cycle is a real thing to go fix.
+    cycles = sorted(reached - set(chain))
+
+    rows: list[dict] = []
+    for node in [*chain, *cycles]:
+        repins = sorted(
+            ({"artifact": site["artifact"], "pin": site["pin"], "form": site["form"],
+              "file": site["file"], "line": site["line"]}
+             for site in sites_by.get(node, []) if site["artifact"] in reached),
+            key=lambda repin: (repin["artifact"], repin["file"], repin["line"]))
+        direct = any(repin["artifact"] == source for repin in repins)
+        rows.append({
+            "artifact": node,
+            "modules": modules_by.get(node, []),
+            "depth": depth[node],
+            "reason": "source" if node == source else ("direct" if direct else "cascade"),
+            "repins": repins,
+            "cyclic": node in cycles,
+        })
+
+    downstream = [row for row in rows if row["artifact"] != source]
+    result = {
+        "ok": True,
+        "artifact": source,
+        "order": rows,
+        "chain": [row["artifact"] for row in rows],
+        "total": len(downstream),
+        "direct": sum(1 for row in downstream if row["reason"] == "direct"),
+        "cascade": sum(1 for row in downstream if row["reason"] == "cascade"),
+        "floating": sorted({consumer for pinned in reached
+                            for consumer in floating.get(pinned, set())} - reached),
+        "cycles": cycles,
+        "note": _SOFT_PIN_NOTE,
+    }
+    if not downstream:
+        result["note"] = f"nothing in this workspace pins '{source}'"
     return result

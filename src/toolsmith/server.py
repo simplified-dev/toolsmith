@@ -202,6 +202,108 @@ def jitpack_build(
     return _jitpack.jitpack_build(module, ref=ref or None, timeout=timeout, force=force)
 
 
+@mcp.tool()
+def jitpack_set(
+    artifact: str,
+    sha: str,
+    modules: list[str] | None = None,
+    check: bool = False,
+    no_verify: bool = False,
+    include_snapshots: bool = False,
+) -> dict:
+    """Rewrite one artifact's JitPack pin across every workspace build file that declares it.
+
+    Replaces the hand-rolled
+    `sed -i -E "s#(:$a\\") \\{ version \\{ strictly\\(\\")[a-f0-9]+...#..#" build.gradle.kts`
+    that a multi-module re-pin gets driven by. Use it instead of Edit when the
+    same sha has to land in several build files.
+
+    Traps this encodes:
+      - A sed that matches nothing exits 0 and prints nothing, so a typo'd
+        artifact is only discovered days later when a build resolves the old
+        sha. Here zero matches is an ERROR carrying the artifact ids that were
+        found. Treat a non-zero exit as "the edit did not happen".
+      - Matching is EXACT, not the substring filter `jitpack pins` audits with.
+        A rewrite that over-matches edits the wrong artifact.
+      - Both dialects are handled - the library `strictly(...)` form and the
+        app `group:artifact:version` form, including a `strictly` wrapped onto
+        the next line - and each site keeps whichever it already used.
+      - `-SNAPSHOT` coordinates are SKIPPED by default: they float onto the new
+        commit by themselves, so nailing one to a sha is a semantic change.
+        Pass include_snapshots to do it anyway.
+      - The sha is checked to be resolvable, pushed, and built on JitPack
+        before anything is written (one read-only list call, never a build).
+        no_verify skips that; the pin is then unchecked.
+      - What gets written is the 7-char sha verification resolved, not the
+        spelling you passed. Every prefix length is a separate JitPack build,
+        so pinning 8 or 40 chars asks for an artifact nobody produced. This is
+        also why `sha` may be any ref local git resolves - a branch, a tag,
+        origin/master - as long as verification is on. Read `sha` back off the
+        result rather than assuming your input was written.
+      - Idempotent: a site already holding the sha reports as unchanged and is
+        not rewritten, and a file with nothing to change is not written at all.
+
+    Args:
+        artifact: artifact id (e.g. "collections"), or "<group>:<artifact>"
+            when one id is pinned under two groups.
+        sha: the pin to write, cut to 7 chars. With verification on this may
+            be any ref local git resolves; the sha it resolves to is written.
+        modules: module aliases, names or paths to narrow the edit to. Empty
+            means every module that pins the artifact.
+        check: report what would change and write nothing.
+        no_verify: skip the JitPack precheck.
+        include_snapshots: also nail `<branch>-SNAPSHOT` coordinates to the sha.
+
+    Returns:
+        artifact, group, sha, check, changed, unchanged, skipped, files (per
+        matched site: file, line, before, after, changed, module, form),
+        skipped_sites (each with a reason), verification, ok and status - one
+        of written, checked, unchanged, unbuilt, unverified, write-failed,
+        precondition.
+
+        When check is False and status is "written", treat as destructive:
+        re-Read any build file you had already Read before editing it further.
+    """
+    return _jitpack.jitpack_set(artifact, sha, modules=modules or (), check=check,
+                                verify=not no_verify, include_snapshots=include_snapshots)
+
+
+@mcp.tool()
+def jitpack_order(artifact: str) -> dict:
+    """List the modules needing a re-pin after an artifact's sha changes, in dependency order.
+
+    Replaces reading every build.gradle.kts in the workspace and working the
+    cascade out by hand. Read-only and offline - it walks the pin graph, not
+    JitPack. Run it BEFORE jitpack_set to know how far the change travels, and
+    walk the chain one module at a time: commit, jitpack_build, then
+    jitpack_set the next module along.
+
+    Traps this encodes:
+      - `strictly` is NOT transitive here. Published gradle module metadata for
+        these artifacts records {"requires": "<sha>"}, so an inherited pin is a
+        SOFT constraint and a consumer's own strictly() overrides it. Do not
+        tell the user gradle forces the whole chain to move.
+      - Hence the two reasons: "direct" means the module pins this artifact
+        itself, and leaving it stale keeps it building against the OLD code.
+        "cascade" means it only pins things that get a new sha as a result -
+        re-pinning is this workspace's one-sha-per-artifact convention.
+      - `-SNAPSHOT` consumers appear under "floating", not in the order: they
+        resolve the new commit with no edit at all, so they earn no commit of
+        their own and do not propagate the cascade.
+      - The order is deterministic (depth, then alphabetical) but not unique;
+        any topological order of the same graph is equally valid.
+
+    Args:
+        artifact: the artifact whose sha is changing.
+
+    Returns:
+        artifact, chain (the flat order, source first), order (per artifact:
+        artifact, modules, depth, reason, repins - the concrete declaration
+        sites to edit), floating, cycles, total, direct, cascade, note, ok.
+    """
+    return _jitpack.jitpack_order(artifact)
+
+
 # Workspace pin drift (`toolsmith jitpack pins`) is deliberately CLI-only, like
 # setup and locate: it is a wide table for a human, not a call in an agent loop.
 
