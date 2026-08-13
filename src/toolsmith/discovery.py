@@ -18,7 +18,7 @@ Two INDEPENDENT axes are recorded, because commands divide on both:
 
 Cache layout:
   <root>/.toolsmith/modules.json   - the discovered inventory (per workspace)
-  <root>/.toolsmith/aliases.json   - optional {module-name: shorthand} overrides
+  <root>/.toolsmith/aliases.json   - optional {path-or-name: shorthand} overrides
   ~/.config/toolsmith/roots.json   - registry so the server finds a cache off-cwd
 """
 from __future__ import annotations
@@ -135,27 +135,55 @@ def _read_overrides(root: Path) -> dict[str, str]:
     return {}
 
 
+def _generated(name: str) -> str:
+    """The alias a name earns on its own: an acronym, or its first three letters."""
+    words = [w for w in re.split(r"[-_]", name) if w]
+    return ("".join(w[0] for w in words) if len(words) > 1 else name[:3]).lower()
+
+
+def _claim(candidate: str, taken: set[str]) -> str:
+    """Returns candidate, or the first free numeric variant of it, and claims it."""
+    cand, base, n = candidate, candidate, 2
+    while cand in taken:
+        cand = f"{base}{n}"
+        n += 1
+    taken.add(cand)
+    return cand
+
+
 def assign_shorthands(mods: list[dict], overrides: dict[str, str] | None = None) -> None:
     """Assigns a short alias to each module in place (collision-aware).
 
     Multi-word names use an acronym (asset-renderer -> ar); single-word names use
-    the first three letters. Overrides ({name: shorthand}) win and are applied first.
+    the first three letters.
+
+    An override may be keyed by workspace-relative PATH or by name, and a path
+    key wins, because a NAME IS NOT UNIQUE: two directories both called "client"
+    take one name-keyed alias between them, and no name-keyed entry can tell them
+    apart. A path names exactly one module and always can.
+
+    Every alias goes through the same collision check, an override included: an
+    override states a preference, not a proof of uniqueness, and two modules
+    claiming one alias leave the second unreachable if the second is not moved
+    aside. Overrides are claimed first so an explicit preference still beats a
+    generated candidate that happens to collide with it, and mods arrive sorted
+    by path, so which of two equal claims is moved aside is stable.
+
+    Args:
+        mods: module dicts, mutated in place to carry "shorthand".
+        overrides: {path-or-name: shorthand}, path winning over name.
     """
     overrides = overrides or {}
-    taken: set[str] = set(overrides.values())
     for m in mods:
-        m["shorthand"] = overrides.get(m["name"])
+        m["shorthand"] = overrides.get(m.get("path")) or overrides.get(m["name"])
+
+    taken: set[str] = set()
     for m in mods:
         if m["shorthand"]:
-            continue
-        words = [w for w in re.split(r"[-_]", m["name"]) if w]
-        cand = ("".join(w[0] for w in words) if len(words) > 1 else m["name"][:3]).lower()
-        base, n = cand, 2
-        while cand in taken:
-            cand = f"{base}{n}"
-            n += 1
-        m["shorthand"] = cand
-        taken.add(cand)
+            m["shorthand"] = _claim(m["shorthand"], taken)
+    for m in mods:
+        if not m["shorthand"]:
+            m["shorthand"] = _claim(_generated(m["name"]), taken)
 
 
 def _register_root(root: Path) -> None:

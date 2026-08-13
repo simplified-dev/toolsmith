@@ -115,6 +115,50 @@ def test_assign_shorthands_unique_and_override():
     assert len(set(sh.values())) == len(sh)  # all unique
 
 
+def test_two_modules_of_one_name_stay_separately_reachable():
+    """A name-keyed override is claimed by every module carrying that name, and the
+    second is unreachable unless it is moved aside - resolution is last-wins."""
+    mods = [{"name": "client", "path": "a/client"}, {"name": "client", "path": "b/client"}]
+
+    discovery.assign_shorthands(mods, overrides={"client": "client"})
+
+    assert [m["shorthand"] for m in mods] == ["client", "client2"]
+
+
+def test_a_path_key_beats_a_name_key():
+    """A name cannot disambiguate two modules that share one; a path always can."""
+    mods = [{"name": "client", "path": "a/client"}, {"name": "client", "path": "b/client"}]
+
+    discovery.assign_shorthands(
+        mods, overrides={"client": "client", "b/client": "bcl"})
+
+    assert [m["shorthand"] for m in mods] == ["client", "bcl"]
+
+
+def test_an_override_beats_a_generated_candidate_that_collides_with_it():
+    """Ordering, not luck: an explicit preference is claimed before any generated one."""
+    mods = [{"name": "reflection", "path": "a/reflection"},
+            {"name": "refl-helper", "path": "b/refl-helper"}]
+
+    discovery.assign_shorthands(mods, overrides={"refl-helper": "ref"})
+
+    sh = {m["name"]: m["shorthand"] for m in mods}
+    assert sh["refl-helper"] == "ref"
+    assert sh["reflection"] == "ref2"
+
+
+def test_every_shorthand_in_a_real_scan_is_unique(tmp_path):
+    _make_module(tmp_path, "one/client", "dev/acme/one")
+    _make_module(tmp_path, "two/client", "dev/acme/two")
+    _make_module(tmp_path, "three/client", "dev/acme/three")
+
+    _root, mods = discovery.scan(tmp_path)
+    discovery.assign_shorthands(mods, overrides={"client": "client"})
+
+    shorthands = [m["shorthand"] for m in mods]
+    assert len(set(shorthands)) == len(shorthands)
+
+
 def test_setup_load_and_resolve_roundtrip(tmp_path, monkeypatch):
     _make_module(tmp_path, "m/collections", "dev/acme/collection")
     monkeypatch.setattr(discovery, "REGISTRY", tmp_path / "reg.json")
