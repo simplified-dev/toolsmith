@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "toolsmith",
   "description": "General-purpose Java workspace dev tools for Claude (MCP server + skills).",
-  "owner": { "name": "Simplified" },
+  "owner": { "name": "CraftedFury" },
   "plugins": [
     {
       "name": "toolsmith",
