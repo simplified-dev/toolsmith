@@ -74,7 +74,7 @@ source, `gradle-verify-gate` says Gradle, a `gradle_*` tool says it needs a grad
   - The cache carries no compatibility shim. A `modules.json` predating these fields raises rather than defaulting - re-run `toolsmith setup`.
 
 ## Import order (java_reorder_imports)
-IntelliJ Default: group1 other (ASCII), blank, group2 `javax.*` then `java.*`, blank, group3 static. Flat-ASCII sort; only `java`/`javax` special-cased; wildcards + CRLF/LF preserved; idempotent. See `notes/drafts/DRAFT-import-order.md` for the empirical derivation.
+IntelliJ Default: group1 other (ASCII), blank, group2 `javax.*` then `java.*`, blank, group3 static. Flat-ASCII sort; only `java`/`javax` special-cased; wildcards + CRLF/LF preserved; idempotent.
 
 ## Build / Test
 ```bash
@@ -88,4 +88,3 @@ python -m pytest -q
 
 ## Info
 - Package `toolsmith` 0.1.0, Apache-2.0. Deps: `fastmcp>=1.0` (+ `pytest` for dev).
-- `notes/` holds the token-optimization audit that produced this project (raw evidence in `notes/data/` is gitignored).

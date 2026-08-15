@@ -183,7 +183,6 @@ src/toolsmith/
   modules.py      cache-backed module/alias/package lookup
   gradle.py · tally.py · imports.py · javadoc.py · jitpack.py · branch.py   one module per tool
 tests/            pytest suite (discovery, reorderer, tally, jitpack, branch)
-notes/            provenance: the token-optimization audit that produced this
 ```
 
 ## Development
@@ -203,4 +202,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Part of the [Simplified-Dev](https://git
 
 ## Acknowledgments
 
-Scaffolded with Claude Code, grounded in a measured audit of real workspace sessions (see `notes/`). Copyright remains with the Simplified project.
+Scaffolded with Claude Code, grounded in a measured audit of real workspace sessions. Copyright remains with the Simplified project.
