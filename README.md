@@ -1,6 +1,6 @@
 # Toolsmith
 
-A general-purpose **Java workspace dev toolkit for AI agents**, packaged as a Claude Code **plugin**. It discovers the modules in any Java workspace and gives the agent typed, deterministic tools - gradle verify, JUnit tally, IntelliJ-faithful import reorder, javadoc normalize, module lookup - as an MCP server, plus a bundle of Java refactor / move / audit **skills**. Each becomes one cheap, correct call instead of a shell incantation the agent re-derives every turn.
+A general-purpose **Java workspace dev toolkit for AI agents**, packaged as a Claude Code **plugin**. It discovers the modules in any Java workspace and gives the agent typed, deterministic tools - gradle verify, JUnit tally, IntelliJ-faithful import reorder, javadoc normalize, module lookup, JSON-against-DTO key coverage - as an MCP server, plus a bundle of Java refactor / move / audit **skills**. Each becomes one cheap, correct call instead of a shell incantation the agent re-derives every turn.
 
 > [!IMPORTANT]
 > Under active development. Tool surface and return shapes may change until a stable `1.0.0`.
@@ -18,6 +18,7 @@ A general-purpose **Java workspace dev toolkit for AI agents**, packaged as a Cl
   - [Moved spellings](#moved-spellings)
 - [Finishing a branch](#finishing-a-branch)
 - [Re-pinning a cascade](#re-pinning-a-cascade)
+- [Auditing a capture against its DTOs](#auditing-a-capture-against-its-dtos)
 - [How discovery works](#how-discovery-works)
 - [Import ordering](#import-ordering)
 - [Architecture](#architecture)
@@ -72,6 +73,7 @@ A prefix names **who can use** the tool: `gradle_*` needs a gradle build, `java_
 | `gradle_tally` | `build/test-results/test/*.xml` -> `{tests, passed, failed, errors, skipped, failing_tests[]}`. |
 | `java_reorder_imports` | Java imports to the IntelliJ **Default** layout, byte-for-byte. Idempotent; wildcard- and CRLF-safe. |
 | `java_docs_normalize` | Audit or `--fix` the javadocs in Java source against the project conventions. |
+| `java_json_diff` | Walk a captured JSON response against the DTO tree that binds it: the wire keys no field claims, and with `phantom` the fields no key feeds. Reads `@SerializedName`, `@SerializedPath`, `@Extract`, `@Capture`, `@Collapse`, `@Key` and `@Flatten`. |
 | `jitpack_status` | Is a module's commit built on JitPack? One read of the versionless build list - **never** triggers a build. |
 | `jitpack_build` | Precheck, then trigger and wait for **one** build of a sha. Returns the verdict, the ready-to-paste `strictly(...)` pin, and the failing `build.log` tail. |
 | `jitpack_set` | Rewrite one artifact's pin across every build file that declares it. Exact match, both dialects, sha verified before writing, idempotent - and zero matches is an **error**, not a silent no-op. |
@@ -101,6 +103,8 @@ toolsmith gradle tally d4j           # JUnit tally
 toolsmith java reorder --check src   # import order gate (or without --check to rewrite)
 toolsmith java docs --fix src        # javadoc audit / fix
 toolsmith java locate TypeRegistrar  # find a class file across module sources
+toolsmith java json_diff --json capture.json --src src/main/java/pkg --root Member
+                                     # wire keys no DTO field binds (--phantom for the reverse)
 toolsmith jitpack status d4j         # are the module's commits built on JitPack (read-only)
 toolsmith jitpack build d4j          # trigger + wait for one build; prints the strictly(<sha>) pin
 toolsmith jitpack pins               # workspace pin-drift table (commits behind / unbuilt / stale)
@@ -112,7 +116,7 @@ toolsmith serve                      # run the stdio MCP server (what the plugin
 
 ### Moved spellings
 
-Six subcommands moved under the two umbrellas. Each old spelling still runs, prints a one-line notice on stderr naming its replacement, and is hidden from `--help`:
+Six subcommands moved under the two umbrellas. Each old spelling still runs, prints a one-line notice on stderr naming its replacement, and is hidden from `--help`. A subcommand that never had a top-level spelling gets none - `java json_diff` is reachable only under its group:
 
 | Deprecated | Current |
 |---|---|
@@ -161,6 +165,23 @@ toolsmith jitpack build utils           # -> the new sha for the next step
 
 `order` is offline. It marks a module **direct** when it declares the changed artifact itself - its own `strictly()` binds, so a stale one keeps it on the old code - and **cascade** when it only pins things that get a new sha as a result. The difference matters because published module metadata records `{"requires": "<sha>"}`, not `strictly`: an inherited pin is a *soft* constraint that a consumer's own `strictly()` overrides, so a full cascade is this workspace's one-sha-per-artifact convention rather than something Gradle demands.
 
+## Auditing a capture against its DTOs
+
+`java json_diff` walks a captured JSON response and the Java class graph that binds it in parallel, and reports the wire keys no field claims. It needs Java source and a JSON file - no gradle build, no network.
+
+```bash
+toolsmith java json_diff --json capture.json --src src/main/java/pkg --root Member
+toolsmith java json_diff ... --union 'profiles.[].members.{}'   # merge every sample first
+toolsmith java json_diff ... --show-mapped --cap 0              # the whole binding table
+toolsmith java json_diff ... --phantom                          # the reverse direction
+```
+
+- **Exit 0 / 1 / 2.** 1 is a red gate: unmapped keys, or a sequence field bound to a JSON object, which cannot decode at all. 2 means the audit never ran - an unreadable capture, a source root that parsed no classes, an unknown `--root`, a path expression that matches nothing.
+- **`--union` merges every match into one template before the walk**, so a key that is optional in each individual sample is still audited once. `--node` narrows to one subtree instead, and `--section` to one top-level key of it.
+- **The format is detected and always overridable**: `gate` under CI, `agent` under an agent harness or a pipe, `human` on a terminal. `--format` beats the detection and `gate` has a name you can type, because a default that flips silently under a pipe makes a CI failure impossible to reproduce by hand.
+- **The Java is read with regexes**, so what it knows is a vocabulary - `@SerializedName`, `@SerializedPath`, `@Extract`, `@Capture`, `@Collapse`, `@Key`, `@Flatten` - and the corrections that can change a verdict are opt-in switches (`--strict names|extract|capture|collapse|flatten|all`).
+- **`--phantom` reports the fields no key feeds** and changes no exit code unless `--fail-on-phantom` asks it to. Most of what it finds on a real capture is a subtree the account never sent, so read it on a unioned capture rather than on one sparse sample. `--open` writes both projections to files and hands them to IntelliJ's diff viewer.
+
 ## How discovery works
 
 `toolsmith setup` walks the root for `build.gradle*` (pruning `build/.git/cache/...`), computes each module's base Java package from its `src/main/java` chain, assigns a short alias (auto-acronym, or your `aliases.json` override), and writes `<root>/.toolsmith/modules.json` plus a `~/.config/toolsmith/roots.json` registry. The server and CLI resolve the active root by: explicit arg -> `TOOLSMITH_ROOT` env -> walking up from the cwd -> the registry default. Re-run `setup` after adding a module.
@@ -181,8 +202,8 @@ src/toolsmith/
   server.py       FastMCP server (thin veneer over the modules below)
   discovery.py    scan + cache + root resolution
   modules.py      cache-backed module/alias/package lookup
-  gradle.py · tally.py · imports.py · javadoc.py · jitpack.py · branch.py   one module per tool
-tests/            pytest suite (discovery, reorderer, tally, jitpack, branch)
+  gradle.py · tally.py · imports.py · javadoc.py · jitpack.py · branch.py · json_diff.py   one module per tool
+tests/            pytest suite (discovery, reorderer, tally, jitpack, branch, json_diff)
 ```
 
 ## Development

@@ -28,13 +28,18 @@ MOVED = [
     (["javadoc"], ["java", "docs"], ["src"]),
 ]
 
+# A grouped subcommand that never had a top-level spelling, and arguments it
+# parses. It earns no MOVED row, which is itself the property tested below.
+UNMOVED = ["java", "json_diff"]
+UNMOVED_REST = ["--json", "capture.json", "--src", "src", "--root", "SkyBlockMember"]
+
 INVENTORY = [{"shorthand": "ar", "name": "asset-renderer", "buildable": True,
               "kind": "gradle", "repo": True,
               "path": "Minecraft-Library/asset-renderer", "package": "lib.minecraft"}]
 
 CURRENT_TOOLS = {
     "gradle_modules", "gradle_verify", "gradle_tally",
-    "java_reorder_imports", "java_docs_normalize",
+    "java_reorder_imports", "java_docs_normalize", "java_json_diff",
     "jitpack_status", "jitpack_build", "jitpack_set", "jitpack_order",
 }
 
@@ -115,6 +120,39 @@ def test_the_current_spelling_prints_no_notice(capsys, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# The subcommands that never moved. A group is where a command is born now,
+# so most of them will never carry a deprecated spelling at all.
+# --------------------------------------------------------------------------
+
+def test_a_subcommand_that_never_moved_is_reachable_only_under_its_group(capsys):
+    """A subcommand born inside a group is offered no flat spelling at all.
+
+    Its row declares None where every other declares a name, and a misread of
+    that None registers a top-level parser anyway - under the literal "None",
+    or under the subcommand's own name. Either one is a spelling nobody was
+    promised, that the help does not mention and that no notice deprecates.
+    """
+    parser = cli.build_parser()
+
+    assert parser.parse_args(UNMOVED + UNMOVED_REST).func is cli._cmd_json_diff
+
+    for flat in (["json_diff"], ["None"]):
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(flat + UNMOVED_REST)
+        assert excinfo.value.code == 2
+    capsys.readouterr()
+
+    assert not re.search(r"^\s+json_diff\s", _help_for(["--help"], capsys), re.M)
+
+
+def test_a_subcommand_that_never_moved_is_marked_for_no_notice():
+    """A notice names where a command moved from, so one that never moved earns none."""
+    parser = cli.build_parser()
+
+    assert getattr(parser.parse_args(UNMOVED + UNMOVED_REST), "moved_from", None) is None
+
+
+# --------------------------------------------------------------------------
 # The help, which is the surface a reader is offered.
 # --------------------------------------------------------------------------
 
@@ -123,6 +161,7 @@ def test_the_group_help_lists_the_subcommands_it_holds(capsys):
     assert re.search(r"^\s+locate\s", java, re.M)
     assert re.search(r"^\s+reorder\s", java, re.M)
     assert re.search(r"^\s+docs\s", java, re.M)
+    assert re.search(r"^\s+json_diff\s", java, re.M)
 
     gradle = _help_for(["gradle", "--help"], capsys)
     assert re.search(r"^\s+modules\s", gradle, re.M)
