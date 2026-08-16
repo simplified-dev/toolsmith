@@ -10,10 +10,11 @@ A subcommand's group names WHO CAN USE it rather than what it happens to parse:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 
-from . import discovery, gradle, modules
+from . import discovery, gradle, json_diff, modules
 from . import imports as imports_mod
 from . import tally as tally_mod
 
@@ -96,6 +97,57 @@ def _cmd_docs(args: argparse.Namespace) -> int:
     for prefix in args.prefix:
         argv += ["--prefix", prefix]
     return javadoc.main(argv + args.paths)
+
+
+def _cmd_json_diff(args: argparse.Namespace) -> int:
+    """Runs one JSON-against-Java walk and prints it in the format that was chosen.
+
+    The verdict is not computed here: exit_code owns the 0/1/2 mapping because
+    it is a property of the result rather than of the shell, and the report text
+    belongs to the renderers for the same reason.
+
+    Args:
+        args: the parsed `java json_diff` arguments
+
+    Returns:
+        0 when every JSON key maps to a field, 1 for a red gate, 2 when the
+        audit never ran
+    """
+    isatty = sys.stdout.isatty()
+    fmt = args.format or json_diff.detect_format(os.environ, isatty)
+    # The projection is what --open, --format diff and --fail-on-phantom each
+    # read, and a run without one can only report that there is none, so asking
+    # for any of them asks for the second walk that produces it.
+    phantom = args.phantom or args.open or args.fail_on_phantom or fmt == "diff"
+    r = json_diff.json_diff(
+        args.json, args.src, root=args.root, node=args.node, union=args.union,
+        section=args.section, show_mapped=args.show_mapped,
+        show_unresolved=args.show_unresolved, max_depth=args.max_depth, cap=args.cap,
+        opaque=args.opaque, map_types=args.map_type, seq_types=args.seq_type,
+        wrapper_types=args.wrapper_type, strict=args.strict,
+        phantom=phantom, fail_on_phantom=args.fail_on_phantom,
+    )
+    out, err = json_diff.render(r, fmt, color=json_diff.use_color(os.environ, isatty),
+                                rows=args.rows)
+    # Each stream already ends in its own newline, so the last one comes off
+    # and print puts it back. _print rather than print because a key out of a
+    # foreign capture is arbitrary text and a cp1252 console raises on it.
+    if out:
+        _print(out[:-1])
+    if err:
+        _print(err[:-1], file=sys.stderr)
+    # The two files and the launch are a side effect of the run rather than its
+    # report, so they are commentary and land on stderr with the rest of it.
+    if args.open and r.get("status") != "precondition":
+        opened = json_diff.open_diff(r)
+        if opened.get("left"):
+            _print(f"wire: {opened['left']}", file=sys.stderr)
+            _print(f"java: {opened['right']}", file=sys.stderr)
+        if opened.get("error"):
+            _print(opened["error"], file=sys.stderr)
+        elif opened.get("launched"):
+            _print(f"opened in {opened['launcher']}", file=sys.stderr)
+    return json_diff.exit_code(r)
 
 
 def _cmd_locate(args: argparse.Namespace) -> int:
@@ -595,6 +647,74 @@ def _docs_args(parser: argparse.ArgumentParser) -> None:
                         help="extra FQN top-level prefix (repeatable)")
 
 
+def _json_diff_args(parser: argparse.ArgumentParser) -> None:
+    """Declares the arguments of `java json_diff`.
+
+    Args:
+        parser: the parser to declare them on
+    """
+    parser.add_argument("--json", required=True, metavar="FILE",
+                        help="the JSON capture to audit")
+    parser.add_argument("--src", required=True, metavar="DIR",
+                        help="Java source root whose classes are parsed")
+    parser.add_argument("--root", required=True, metavar="CLASS",
+                        help="the class the walk starts from, by simple or nested name")
+    parser.add_argument("--node", default="", metavar="PATH",
+                        help="dotted path narrowing the document to one subtree "
+                             "(default: the document itself)")
+    parser.add_argument("--union", default="", metavar="EXPR",
+                        help="path expression whose matches merge into one template before "
+                             "the walk, so a key optional in every sample is still audited; "
+                             "[] is every array element and {} every object value")
+    parser.add_argument("--section", default=None, metavar="KEY",
+                        help="keep only this top-level key of the node; it narrows the "
+                             "capture and not the class graph, so it is refused together "
+                             "with a projection")
+    parser.add_argument("--format", default=None, choices=list(json_diff.FORMATS),
+                        help="report format (default: detected - gate under CI, agent under "
+                             "an agent harness or a pipe, human on a terminal)")
+    parser.add_argument("--show-mapped", action="store_true",
+                        help="also list the keys a field does map")
+    parser.add_argument("--show-unresolved", action="store_true",
+                        help="also list object-valued fields whose Java type did not parse")
+    parser.add_argument("--max-depth", type=int, default=12, metavar="N",
+                        help="how deep the parallel walk descends (default: 12)")
+    parser.add_argument("--cap", type=int, default=0, metavar="N",
+                        help="rows per returned key list; 0 is uncapped, which is the shell "
+                             "default because a shell caller pipes to a file")
+    parser.add_argument("--rows", type=int, default=json_diff.AGENT_ROWS, metavar="N",
+                        help="findings the agent report prints before deferring the rest "
+                             f"(default: {json_diff.AGENT_ROWS}; 0 prints every one)")
+    # Each switch corrects one annotation's handling and each can change the
+    # verdict, which is why the library defaults them off and why they are named
+    # one at a time here rather than folded into a single --strict.
+    parser.add_argument("--strict", action="append", default=[], metavar="SWITCH",
+                        choices=sorted(json_diff._STRICT_FEATURES) + ["all"],
+                        help="turn on one strictness switch, repeatable: "
+                             + ", ".join(sorted(json_diff._STRICT_FEATURES)) + ", or all")
+    parser.add_argument("--opaque", action="append", default=[], metavar="TYPE",
+                        help="type the walk never descends into, repeatable; an entry "
+                             "written '-Name' is removed from the built-in set instead")
+    parser.add_argument("--map-type", action="append", default=[], metavar="TYPE",
+                        help="collection type whose LAST type argument describes a JSON "
+                             "object's values, added and subtracted like --opaque")
+    parser.add_argument("--seq-type", action="append", default=[], metavar="TYPE",
+                        help="collection type whose FIRST type argument describes an "
+                             "element, added and subtracted like --opaque")
+    parser.add_argument("--wrapper-type", action="append", default=[], metavar="TYPE",
+                        help="type unwrapped to the type inside it, added and subtracted "
+                             "like --opaque")
+    parser.add_argument("--phantom", action="store_true",
+                        help="also project both sides and report the fields no JSON key "
+                             "reaches; a second walk over the whole class graph")
+    parser.add_argument("--fail-on-phantom", action="store_true",
+                        help="let that second direction decide the exit code (implies "
+                             "--phantom)")
+    parser.add_argument("--open", action="store_true",
+                        help="write both projections to files and open them in IntelliJ's "
+                             "diff viewer (implies --phantom)")
+
+
 def _modules_args(parser: argparse.ArgumentParser) -> None:
     """Declares the arguments of `gradle modules`, which takes none.
 
@@ -636,14 +756,23 @@ def _tally_args(parser: argparse.ArgumentParser) -> None:
 # The argument shape is a function because each is declared twice, once under
 # the group and once under the deprecated top-level spelling, and two hand-kept
 # copies of a flag list drift.
+#
+# The deprecated spelling is None for a subcommand that never had a top-level
+# one. It stays in this table rather than being registered separately so that
+# one table remains the single declaration of the group's surface: the help
+# text, the argument shape and the handler cannot drift from it, where a second
+# registration block would duplicate the configure / set_defaults wiring this
+# table exists to centralise.
 _Configure = Callable[[argparse.ArgumentParser], None]
 _Handler = Callable[[argparse.Namespace], int]
-_GROUPED_COMMANDS: tuple[tuple[str, str, str, str, _Configure, _Handler], ...] = (
+_GROUPED_COMMANDS: tuple[tuple[str, str, str | None, str, _Configure, _Handler], ...] = (
     ("java", "locate", "locate", "find a class file by name across module sources",
      _locate_args, _cmd_locate),
     ("java", "reorder", "reorder", "reorder Java imports to the IntelliJ Default layout",
      _reorder_args, _cmd_reorder),
     ("java", "docs", "javadoc", "audit or --fix javadocs", _docs_args, _cmd_docs),
+    ("java", "json_diff", None, "diff a JSON capture against the DTO tree that binds it",
+     _json_diff_args, _cmd_json_diff),
     ("gradle", "modules", "modules", "print the cached module inventory",
      _modules_args, _cmd_modules),
     ("gradle", "verify", "verify", "module-scoped gradle gate", _verify_args, _cmd_verify),
@@ -683,7 +812,8 @@ def build_parser() -> argparse.ArgumentParser:
         "java": sub.add_parser(
             "java", help="tools that act on Java source",
             description="Commands that read or rewrite Java source files.",
-        ).add_subparsers(dest="action", required=True, metavar="{locate,reorder,docs}"),
+        ).add_subparsers(dest="action", required=True,
+                         metavar="{locate,reorder,docs,json_diff}"),
         "gradle": sub.add_parser(
             "gradle", help="tools that act on a gradle build",
             description="Commands that need a gradle build to run against.",
@@ -693,6 +823,10 @@ def build_parser() -> argparse.ArgumentParser:
         current = groups[group].add_parser(name, help=help_text)
         configure(current)
         current.set_defaults(func=handler)
+        # A subcommand that never had a top-level spelling declares None and
+        # gets no deprecated registration - there is nothing to deprecate.
+        if old is None:
+            continue
         # The deprecated top-level spelling runs the same handler. It carries no
         # help, which is what keeps it out of `--help`: argparse renders a
         # SUPPRESS help as the literal "==SUPPRESS==" for a subparser, where an

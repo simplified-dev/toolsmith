@@ -16,6 +16,7 @@ from . import gradle as _gradle
 from . import imports as _imports
 from . import javadoc as _javadoc
 from . import jitpack as _jitpack
+from . import json_diff as _json_diff
 from . import modules as _modules
 from . import tally as _tally
 
@@ -124,6 +125,115 @@ def java_docs_normalize(
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         code = _javadoc.main(argv)
     return {"fixed": fix, "exit_code": code, "output": buf.getvalue()[-8000:]}
+
+
+@mcp.tool()
+def java_json_diff(
+    json_path: str,
+    src: str,
+    root: str,
+    node: str = "",
+    union: str = "",
+    section: str | None = None,
+    show_mapped: bool = False,
+    show_unresolved: bool = False,
+    max_depth: int = 12,
+    cap: int = 200,
+    opaque: list[str] | None = None,
+    map_types: list[str] | None = None,
+    seq_types: list[str] | None = None,
+    wrapper_types: list[str] | None = None,
+    strict: list[str] | None = None,
+    phantom: bool = False,
+    fail_on_phantom: bool = False,
+) -> dict:
+    """Diff a JSON capture against the Java DTO tree that binds it and report unmapped keys.
+
+    Needs a Java source root holding the classes and a JSON file captured from
+    the API they bind. Needs no gradle build, no network and no IDE - it parses
+    the Java with regexes and walks the JSON, so it runs against a checkout
+    alone. Replaces reading a multi-megabyte capture by hand to find out which
+    of its keys the DTO tree does not bind.
+
+    Traps this encodes:
+      - What it understands is a VOCABULARY rather than a language:
+        @SerializedName, @SerializedPath, @Extract, @Capture, @Collapse, @Key
+        and @Flatten. @Lenient, @Split and @Fallback are read by nothing, and a
+        field declaration split across two lines matches nothing at all - which
+        is what empty_classes reports.
+      - A key optional in every individual sample reports unmapped from a
+        single sample and mapped from a union of them. Pass union to merge the
+        samples into one template first.
+      - The strictness switches all default OFF. Each corrects one annotation's
+        handling and each can change the verdict on a capture the walk calls
+        clean, so each is asked for by name.
+      - Key lists carry `cap` rows and the counts beside them do not, so
+        `truncated` is what says a list is short.
+      - phantom answers the OPPOSITE question - fields no JSON key reaches -
+        and most of that answer is a subtree the account simply did not send.
+        It also puts both whole projections in the return uncapped, which is
+        the one place bulk is allowed in, so ask for it deliberately.
+
+    Args:
+        json_path: path to the JSON capture to audit. Spelled with the suffix
+            because a parameter named `json` shadows an attribute of the model
+            the tool schema is built from.
+        src: Java source root whose classes are parsed.
+        root: the class the walk starts from, by simple or nested name.
+        node: dotted path narrowing the document to one subtree. Empty audits
+            the document itself.
+        union: path expression whose matched nodes merge into one template
+            before the walk. `[]` is every array element, `{}` every object
+            value.
+        section: keep only this top-level key of the node. It narrows the
+            capture alone, so it is refused together with phantom.
+        show_mapped: also return the keys a field does map (large - use cap).
+        show_unresolved: also return fields whose Java type did not parse.
+        max_depth: how deep the parallel walk descends.
+        cap: rows per returned list. 0 is uncapped.
+        opaque: type names to add to the never-descend set. An entry written
+            "-Name" is removed from the built-in set instead.
+        map_types: collection types whose LAST type argument describes a JSON
+            object's values. Added and subtracted like opaque.
+        seq_types: collection types whose FIRST type argument describes an
+            element. Added and subtracted like opaque.
+        wrapper_types: types unwrapped to the type inside them. Added and
+            subtracted like opaque.
+        strict: strictness switches to turn on - names, extract, capture,
+            collapse, flatten - or "all".
+        phantom: also project both sides and report the fields no JSON key
+            reaches. It projects from root, which section does not narrow.
+        fail_on_phantom: let that second direction decide ok / the exit code.
+
+    Returns:
+        The inputs echoed, then ok, the counts unmapped / mapped / unresolved /
+        classes, sections (each: section, count, a capped keys list of
+        path/kind), shape_mismatches, and the diagnostics empty_classes,
+        ambiguous_types and unreadable_files - none of which is a finding about
+        the JSON.
+
+        Under phantom, three more: phantoms, the capped list of paths the class
+        graph can bind and the document never fed; phantom_total beside it; and
+        projection, holding the two whole sorted line lists uncapped.
+
+        ok is True only when no key was unmapped AND no shape mismatched; a
+        phantom never moves it unless fail_on_phantom asked. A precondition
+        failure - unreadable capture, source root that parsed no classes,
+        unknown root class, path expression that matches nothing - sets status
+        "precondition" and a top-level error, and reports no counts at all.
+    """
+    return _json_diff.json_diff(
+        json_path, src, root=root, node=node, union=union, section=section,
+        show_mapped=show_mapped, show_unresolved=show_unresolved,
+        max_depth=max_depth, cap=cap, opaque=opaque or (), map_types=map_types or (),
+        seq_types=seq_types or (), wrapper_types=wrapper_types or (), strict=strict or (),
+        phantom=phantom, fail_on_phantom=fail_on_phantom)
+
+
+# The editor hand-off (`toolsmith java json_diff --open`) is deliberately not a
+# parameter above: it opens a diff viewer on somebody's screen and an agent has
+# none. Nothing here can reach json_diff.open_diff, since json_diff() never
+# calls it and no argument of this tool selects it.
 
 
 @mcp.tool()
