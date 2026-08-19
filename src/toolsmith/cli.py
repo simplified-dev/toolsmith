@@ -747,60 +747,43 @@ def _tally_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fails", type=int, default=15)
 
 
-# The grouped subcommands, as (group, name, deprecated spelling, help, argument
-# shape, handler). The group marks WHO CAN USE the command rather than what it
-# parses - a gradle project that carries no Java source cannot use `java docs`,
-# and a Java tree with no gradle build cannot use `gradle verify` - so a new
-# subcommand belongs under the umbrella naming what it needs to exist.
+# The grouped subcommands, as (group, name, help, argument shape, handler). The
+# group marks WHO CAN USE the command rather than what it parses - a gradle
+# project that carries no Java source cannot use `java docs`, and a Java tree
+# with no gradle build cannot use `gradle verify` - so a new subcommand belongs
+# under the umbrella naming what it needs to exist.
 #
-# The argument shape is a function because each is declared twice, once under
-# the group and once under the deprecated top-level spelling, and two hand-kept
-# copies of a flag list drift.
+# A subcommand is reachable under its group and NOWHERE ELSE: `toolsmith
+# modules` and `toolsmith json_diff` are both argparse usage errors, because
+# nothing registers a top-level parser for either.
 #
-# The deprecated spelling is None for a subcommand that never had a top-level
-# one. It stays in this table rather than being registered separately so that
-# one table remains the single declaration of the group's surface: the help
-# text, the argument shape and the handler cannot drift from it, where a second
-# registration block would duplicate the configure / set_defaults wiring this
-# table exists to centralise.
+# The argument shape is a function because a table literal cannot hold
+# add_argument calls, and holding it here is what makes this table the single
+# declaration of the group's surface - the help text, the arguments and the
+# handler are written once and cannot drift from each other.
 _Configure = Callable[[argparse.ArgumentParser], None]
 _Handler = Callable[[argparse.Namespace], int]
-_GROUPED_COMMANDS: tuple[tuple[str, str, str | None, str, _Configure, _Handler], ...] = (
-    ("java", "locate", "locate", "find a class file by name across module sources",
+_GROUPED_COMMANDS: tuple[tuple[str, str, str, _Configure, _Handler], ...] = (
+    ("java", "locate", "find a class file by name across module sources",
      _locate_args, _cmd_locate),
-    ("java", "reorder", "reorder", "reorder Java imports to the IntelliJ Default layout",
+    ("java", "reorder", "reorder Java imports to the IntelliJ Default layout",
      _reorder_args, _cmd_reorder),
-    ("java", "docs", "javadoc", "audit or --fix javadocs", _docs_args, _cmd_docs),
-    ("java", "json_diff", None, "diff a JSON capture against the DTO tree that binds it",
+    ("java", "docs", "audit or --fix javadocs", _docs_args, _cmd_docs),
+    ("java", "json_diff", "diff a JSON capture against the DTO tree that binds it",
      _json_diff_args, _cmd_json_diff),
-    ("gradle", "modules", "modules", "print the cached module inventory",
-     _modules_args, _cmd_modules),
-    ("gradle", "verify", "verify", "module-scoped gradle gate", _verify_args, _cmd_verify),
-    ("gradle", "tally", "tally", "JUnit result tally", _tally_args, _cmd_tally),
+    ("gradle", "modules", "print the cached module inventory", _modules_args, _cmd_modules),
+    ("gradle", "verify", "module-scoped gradle gate", _verify_args, _cmd_verify),
+    ("gradle", "tally", "JUnit result tally", _tally_args, _cmd_tally),
 )
-
-
-def _deprecation_notice(old: str, new: str) -> None:
-    """Names the current spelling of a subcommand a deprecated one just ran.
-
-    The notice goes to stderr, as every other piece of commentary here does, so
-    a piped stdout carries only what the command itself printed.
-
-    Args:
-        old: the deprecated spelling that was invoked
-        new: the spelling to use instead
-    """
-    print(f"toolsmith: `toolsmith {old}` is deprecated - use `toolsmith {new}`",
-          file=sys.stderr)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="toolsmith",
                                      description="Java workspace dev tools + MCP server.")
-    # The metavar is the surface: the deprecated spellings are registered on the
-    # same subparsers and would otherwise be listed in the usage line.
-    sub = parser.add_subparsers(dest="cmd", required=True,
-                                metavar="{setup,serve,java,gradle,jitpack,branch}")
+    # No metavar: every registered parser is one a caller is offered, so the
+    # list argparse derives IS the surface and it updates itself when a group is
+    # added, where a hand-written one drifts from what is registered.
+    sub = parser.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("setup", help="scan a workspace and cache its module inventory")
     s.add_argument("root", nargs="?", default=".", help="workspace root to scan (default: cwd)")
@@ -819,21 +802,10 @@ def build_parser() -> argparse.ArgumentParser:
             description="Commands that need a gradle build to run against.",
         ).add_subparsers(dest="action", required=True, metavar="{modules,verify,tally}"),
     }
-    for group, name, old, help_text, configure, handler in _GROUPED_COMMANDS:
-        current = groups[group].add_parser(name, help=help_text)
-        configure(current)
-        current.set_defaults(func=handler)
-        # A subcommand that never had a top-level spelling declares None and
-        # gets no deprecated registration - there is nothing to deprecate.
-        if old is None:
-            continue
-        # The deprecated top-level spelling runs the same handler. It carries no
-        # help, which is what keeps it out of `--help`: argparse renders a
-        # SUPPRESS help as the literal "==SUPPRESS==" for a subparser, where an
-        # absent one registers no help entry at all.
-        deprecated = sub.add_parser(old)
-        configure(deprecated)
-        deprecated.set_defaults(func=handler, moved_from=(old, f"{group} {name}"))
+    for group, name, help_text, configure, handler in _GROUPED_COMMANDS:
+        command = groups[group].add_parser(name, help=help_text)
+        configure(command)
+        command.set_defaults(func=handler)
 
     # One parser per action rather than one shared flag set: --force and
     # --allow-symbolic only mean anything to build, and a shared parser accepted
@@ -956,9 +928,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    moved = getattr(args, "moved_from", None)
-    if moved is not None:
-        _deprecation_notice(*moved)
     return args.func(args)
 
 

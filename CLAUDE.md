@@ -46,17 +46,20 @@ source, `gradle-verify-gate` says Gradle, a `gradle_*` tool says it needs a grad
 - Four nested subcommand groups: `toolsmith java {locate,reorder,docs,json_diff}`, `toolsmith gradle
   {modules,verify,tally}`, `toolsmith jitpack {status,build,pins,set,order}` and `toolsmith branch
   {finish}`
-- A grouped subcommand that MOVED keeps its former top-level spelling as a deprecated alias: same
-  handler, a one-line notice on stderr naming the current spelling, and no `--help` entry (argparse
-  renders a SUPPRESS help as the literal `==SUPPRESS==` for a subparser, so the alias is registered
-  with no help at all, and the top-level `metavar` keeps it out of the usage line). One
-  `_GROUPED_COMMANDS` row declares both spellings, and the argument shape is a function so neither
-  copy can drift.
-- **A subcommand that never had a top-level spelling declares `old = None` in that same table and
-  gets no alias** - there is nothing to deprecate, and `toolsmith json_diff` is an argparse usage
-  error rather than a second name. It stays in the table so the group's help text, argument shape
-  and handler keep one declaration; a separate registration block would duplicate the wiring the
-  table exists to centralise. The next new command meets the same slot.
+- **A subcommand is reachable under its group and nowhere else.** `toolsmith modules`, `toolsmith
+  verify`, `toolsmith tally`, `toolsmith locate`, `toolsmith reorder`, `toolsmith javadoc` and
+  `toolsmith json_diff` are all argparse usage errors, and nothing registers a top-level parser to
+  make one work - so a caller reading the help is reading the whole surface. Do not add a second
+  spelling for an existing command: a name the help does not mention and no documentation names is a
+  compatibility burden nobody asked for.
+- One `_GROUPED_COMMANDS` row - `(group, name, help, argument shape, handler)` - is the single
+  declaration of a subcommand, so its help text, arguments and handler cannot drift from each other.
+  The argument shape is a **function** because a table literal cannot hold `add_argument` calls. The
+  next new command meets the same slot.
+- **The top-level subparsers set NO `metavar`**, so the choice list argparse derives IS the surface
+  and updates itself when a group is added. `test_the_top_level_help_offers_only_the_grouped_surface`
+  reads that derived list, which is why it asserts what is registered rather than that a hardcoded
+  string was typed correctly.
 - Plugin MCP: `.mcp.json` launches `toolsmith serve`
 - Bundled skills under `skills/` (auto-discovered when the plugin is enabled)
 

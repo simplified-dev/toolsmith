@@ -1,12 +1,13 @@
-"""Tests for the command surface - the umbrellas, the aliases, and the tool names.
+"""Tests for the command surface - the umbrellas, the spellings, and the tool names.
 
 A prefix marks WHO CAN USE a command rather than what it parses, so the surface
 is itself a contract: `toolsmith java <cmd>` needs Java source, `toolsmith
 gradle <cmd>` needs a gradle build, and the MCP tools carry the same two
-prefixes. What is pinned here is that both spellings of a moved subcommand reach
-one handler, that the deprecation notice never reaches stdout (a piped stdout
-carries results, not commentary), and that each MCP tool answers to exactly one
-name - nothing types those by hand, so a second name is only ambiguity.
+prefixes. What is pinned here is that a grouped subcommand is reachable under
+its group and nowhere else, that a command's result reaches stdout with nothing
+on stderr beside it (a piped stdout carries results, not commentary), and that
+each MCP tool answers to exactly one name - nothing types those by hand, so a
+second name is only ambiguity.
 """
 from __future__ import annotations
 
@@ -17,21 +18,27 @@ import pytest
 
 from toolsmith import cli, modules, server
 
-# One row per moved subcommand: the deprecated argv, the current argv, and
-# arguments valid under both.
-MOVED = [
-    (["modules"], ["gradle", "modules"], []),
-    (["verify"], ["gradle", "verify"], ["ar", "test"]),
-    (["tally"], ["gradle", "tally"], ["d4j"]),
-    (["locate"], ["java", "locate"], ["TypeRegistrar"]),
-    (["reorder"], ["java", "reorder"], ["src"]),
-    (["javadoc"], ["java", "docs"], ["src"]),
+JSON_DIFF_REST = ["--json", "capture.json", "--src", "src", "--root", "SkyBlockMember"]
+
+# One row per grouped subcommand: the argv that reaches it, arguments it parses,
+# and the handler it must land on. The handler is named here rather than read
+# back out of _GROUPED_COMMANDS, which would only assert the table against
+# itself.
+GROUPED = [
+    (["gradle", "modules"], [], cli._cmd_modules),
+    (["gradle", "verify"], ["ar", "test"], cli._cmd_verify),
+    (["gradle", "tally"], ["d4j"], cli._cmd_tally),
+    (["java", "locate"], ["TypeRegistrar"], cli._cmd_locate),
+    (["java", "reorder"], ["src"], cli._cmd_reorder),
+    (["java", "docs"], ["src"], cli._cmd_docs),
+    (["java", "json_diff"], JSON_DIFF_REST, cli._cmd_json_diff),
 ]
 
-# A grouped subcommand that never had a top-level spelling, and arguments it
-# parses. It earns no MOVED row, which is itself the property tested below.
-UNMOVED = ["java", "json_diff"]
-UNMOVED_REST = ["--json", "capture.json", "--src", "src", "--root", "SkyBlockMember"]
+# The flat spellings nobody is offered: every grouped subcommand's bare name,
+# plus `javadoc` for the one whose group name differs from it. A misread of the
+# table registers a top-level parser under one of these, which is a spelling the
+# help does not mention and no documentation names.
+FLAT = ["modules", "verify", "tally", "locate", "reorder", "javadoc", "docs", "json_diff"]
 
 INVENTORY = [{"shorthand": "ar", "name": "asset-renderer", "buildable": True,
               "kind": "gradle", "repo": True,
@@ -66,50 +73,38 @@ def _tool_names() -> set[str]:
 
 
 # --------------------------------------------------------------------------
-# The aliases. One handler per subcommand, reachable under either spelling.
+# The spellings. A group is where a command lives, and the only way in.
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("deprecated, current, rest", MOVED)
-def test_an_alias_runs_the_handler_of_its_current_spelling(deprecated, current, rest):
-    parser = cli.build_parser()
-
-    assert parser.parse_args(deprecated + rest).func is parser.parse_args(current + rest).func
+@pytest.mark.parametrize("argv, rest, handler", GROUPED)
+def test_a_grouped_subcommand_reaches_its_handler(argv, rest, handler):
+    assert cli.build_parser().parse_args(argv + rest).func is handler
 
 
-@pytest.mark.parametrize("deprecated, current, rest", MOVED)
-def test_only_the_alias_is_marked_for_a_notice(deprecated, current, rest):
-    parser = cli.build_parser()
+@pytest.mark.parametrize("flat", FLAT)
+def test_a_flat_spelling_is_a_usage_error(flat, capsys):
+    """A subcommand is reachable under its group and nowhere else.
 
-    assert parser.parse_args(deprecated + rest).moved_from == (deprecated[0], " ".join(current))
-    assert getattr(parser.parse_args(current + rest), "moved_from", None) is None
+    Registering a second top-level parser is how a subcommand acquires a
+    spelling nobody was promised: one the help does not mention, that no
+    documentation names, and that quietly becomes a compatibility burden.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        cli.build_parser().parse_args([flat])
 
-
-def test_an_alias_takes_the_arguments_its_current_spelling_takes():
-    """The two spellings share one argument shape, so neither can drift."""
-    parser = cli.build_parser()
-
-    deprecated = parser.parse_args(["javadoc", "--fix", "--scope", "class", "src"])
-    current = parser.parse_args(["java", "docs", "--fix", "--scope", "class", "src"])
-
-    assert (deprecated.fix, deprecated.scope, deprecated.paths) == (True, "class", ["src"])
-    assert (deprecated.fix, deprecated.scope, deprecated.paths) == (current.fix, current.scope,
-                                                                    current.paths)
+    assert excinfo.value.code == 2
+    capsys.readouterr()
 
 
-def test_the_notice_lands_on_stderr_and_the_command_output_on_stdout(capsys, monkeypatch):
+def test_a_grouped_subcommand_takes_the_arguments_its_shape_declares():
+    """The argument shape reaches the parser the table registered it against."""
+    args = cli.build_parser().parse_args(["java", "docs", "--fix", "--scope", "class", "src"])
+
+    assert (args.fix, args.scope, args.paths) == (True, "class", ["src"])
+
+
+def test_a_result_lands_on_stdout_with_nothing_beside_it(capsys, monkeypatch):
     """Commentary on stderr is what keeps a piped stdout readable as data."""
-    monkeypatch.setattr(modules, "get_modules", lambda: INVENTORY)
-
-    assert cli.main(["modules"]) == 0
-
-    captured = capsys.readouterr()
-    assert "asset-renderer" in captured.out
-    assert "deprecated" not in captured.out
-    assert "`toolsmith modules` is deprecated" in captured.err
-    assert "toolsmith gradle modules" in captured.err
-
-
-def test_the_current_spelling_prints_no_notice(capsys, monkeypatch):
     monkeypatch.setattr(modules, "get_modules", lambda: INVENTORY)
 
     assert cli.main(["gradle", "modules"]) == 0
@@ -117,39 +112,6 @@ def test_the_current_spelling_prints_no_notice(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "asset-renderer" in captured.out
     assert captured.err == ""
-
-
-# --------------------------------------------------------------------------
-# The subcommands that never moved. A group is where a command is born now,
-# so most of them will never carry a deprecated spelling at all.
-# --------------------------------------------------------------------------
-
-def test_a_subcommand_that_never_moved_is_reachable_only_under_its_group(capsys):
-    """A subcommand born inside a group is offered no flat spelling at all.
-
-    Its row declares None where every other declares a name, and a misread of
-    that None registers a top-level parser anyway - under the literal "None",
-    or under the subcommand's own name. Either one is a spelling nobody was
-    promised, that the help does not mention and that no notice deprecates.
-    """
-    parser = cli.build_parser()
-
-    assert parser.parse_args(UNMOVED + UNMOVED_REST).func is cli._cmd_json_diff
-
-    for flat in (["json_diff"], ["None"]):
-        with pytest.raises(SystemExit) as excinfo:
-            parser.parse_args(flat + UNMOVED_REST)
-        assert excinfo.value.code == 2
-    capsys.readouterr()
-
-    assert not re.search(r"^\s+json_diff\s", _help_for(["--help"], capsys), re.M)
-
-
-def test_a_subcommand_that_never_moved_is_marked_for_no_notice():
-    """A notice names where a command moved from, so one that never moved earns none."""
-    parser = cli.build_parser()
-
-    assert getattr(parser.parse_args(UNMOVED + UNMOVED_REST), "moved_from", None) is None
 
 
 # --------------------------------------------------------------------------
@@ -170,14 +132,16 @@ def test_the_group_help_lists_the_subcommands_it_holds(capsys):
 
 
 def test_the_top_level_help_offers_only_the_grouped_surface(capsys):
+    """The choice list argparse derives is the surface, since nothing sets a metavar.
+
+    A hand-written metavar would assert only that a string was typed correctly;
+    this asserts that these six are what is registered.
+    """
     text = _help_for(["--help"], capsys)
 
     assert "{setup,serve,java,gradle,jitpack,branch}" in text
-    # An alias is registered with no help at all: argparse renders a SUPPRESS
-    # help as the literal "==SUPPRESS==" for a subparser rather than hiding it.
-    assert "SUPPRESS" not in text
-    for deprecated, _, _ in MOVED:
-        assert not re.search(rf"^\s+{deprecated[0]}\s", text, re.M)
+    for flat in FLAT:
+        assert not re.search(rf"^\s+{flat}\s", text, re.M)
 
 
 # --------------------------------------------------------------------------
