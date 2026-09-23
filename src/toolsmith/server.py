@@ -70,12 +70,17 @@ def gradle_verify(
 def gradle_tally(module: str, subdir: str = "", fails: int = 15) -> dict:
     """Parse a gradle module's JUnit XML and return counts plus the names of failing tests.
 
-    Needs a gradle module that has already run its tests. Replaces the recurring
-    grep/awk/python one-liners over build/test-results/test/*.xml.
+    Needs a gradle module that has already run its tests. Reads every
+    build/test-results/<task>/*.xml under the module - the root's own and each
+    subproject's at any depth, for every test task (test, aptTest,
+    integrationTest, ...) - so a multi-project build is tallied whole. Returns
+    the grand total plus `results`, one row per results directory with its
+    subproject `path`, `task` and counts. Replaces the recurring grep/awk/python
+    one-liners over that XML.
 
     Args:
         module: module alias, name, or path whose test-results to tally.
-        subdir: optional sub-path holding a nested build dir.
+        subdir: optional sub-path the search for results directories starts from.
         fails: cap on the number of failing testcase names returned.
     """
     return _tally.tally(module, subdir=subdir, fails_cap=fails)
