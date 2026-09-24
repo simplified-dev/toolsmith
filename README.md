@@ -139,11 +139,12 @@ A name's prefix marks **who can use** it rather than what it happens to parse: `
 | `subdir` | `str` | `""` | sub-path the search for results directories starts from |
 | `fails` | `int` | `15` | cap on the failing testcase names returned |
 
-**Result**: the grand total `classes`, `tests`, `passed`, `skipped`, `failures`, `errors`, plus `failing_tests[]`, `failing_total`, `found`, `ok`, `module`, and `results[]` - one row per results directory, with its subproject `path` (`.` for the module root), its `task` and that directory's own counts.
+**Result**: the grand total `classes`, `tests`, `passed`, `skipped`, `failures`, `errors`, plus `failing_tests[]`, `failing_total`, `found`, `ok`, `module`, and `results[]` - one row per results directory, with its subproject `path` (`.` for the module root), its `task`, that directory's own counts, `stale` and `age_seconds` (since its newest XML was written).
 
 **Tips**
 
 - Reads every `build/test-results/<task>/*.xml` under the module: the root's own and each subproject's at any depth, for every test task (`test`, `aptTest`, `integrationTest`, ...). A multi-project build keeps nothing at the root, and is tallied whole. `.git`, `.gradle`, `node_modules` and the inside of a `build` directory are not searched for subprojects.
+- A results directory whose newest XML is older than the newest compiled test class of its subproject is `stale` - an earlier run left it behind - and its counts and failing tests stay out of the total. It is judged by `build/classes/<language>/<task>/` where that exists, and otherwise by the newest non-`main` class under the subproject's `build/classes` (a task like `aptTest17` runs `aptTest`'s classes). With no compiled classes to compare against, a directory is never stale.
 - Replaces the recurring grep / awk / python one-liners over that XML. Never hand-roll that again.
 - The XML is whatever the last run left behind. If the tests restored from cache, the numbers are from an *earlier* run - `gradle_verify(rerun=True)` first.
 - `found: false` (with a `note`) means there is no XML at all, which is different from zero tests.
@@ -898,11 +899,11 @@ toolsmith java json_diff ... --phantom                          # the reverse di
 | `MODULE` | *required* | alias, name, or path |
 | `--fails N` | `15` | cap on the failing test names printed |
 
-**Result**: one `classes= tests= passed= skipped= failures= errors=` line for the grand total; where the module holds more than one results directory, an indented `<path>/<task>` line with that directory's counts per directory; then a `FAIL <name>` line per failing test. Exit `0` green, `1` with failures or errors, `2` when there is no XML.
+**Result**: one `classes= tests= passed= skipped= failures= errors=` line for the grand total; where the module holds more than one results directory, an indented `<path>/<task>` line with that directory's counts per directory, a stale one ending `stale, <age> old - not in the total` and printed even when it is the only one; then a `FAIL <name>` line per failing test. Exit `0` green, `1` with failures or errors, `2` when there is no XML.
 
 **Tips**
 
-- Every `build/test-results/<task>/` under the module counts - the root's and each subproject's at any depth, for every test task - so a multi-project build answers whole rather than "nothing ran".
+- Every `build/test-results/<task>/` under the module counts - the root's and each subproject's at any depth, for every test task - so a multi-project build answers whole rather than "nothing ran". A directory whose results predate its subproject's newest compiled test class is marked stale and left out of the total.
 - Never write an inline python or awk over `build/test-results/*/*.xml` again. This is that, correctly.
 - The XML is from the *last* run. If it restored from cache, re-run with `gradle verify --rerun` first.
 

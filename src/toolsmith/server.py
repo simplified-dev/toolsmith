@@ -75,8 +75,10 @@ def gradle_tally(module: str, subdir: str = "", fails: int = 15) -> dict:
     subproject's at any depth, for every test task (test, aptTest,
     integrationTest, ...) - so a multi-project build is tallied whole. Returns
     the grand total plus `results`, one row per results directory with its
-    subproject `path`, `task` and counts. Replaces the recurring grep/awk/python
-    one-liners over that XML.
+    subproject `path`, `task`, counts, `stale` and `age_seconds`. A directory
+    whose newest XML is older than the newest compiled test class of its
+    subproject is stale - left behind by an earlier run - and stays out of the
+    total. Replaces the recurring grep/awk/python one-liners over that XML.
 
     Args:
         module: module alias, name, or path whose test-results to tally.

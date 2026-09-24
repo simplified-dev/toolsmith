@@ -1,6 +1,9 @@
 """Tests for the JUnit result tally."""
 from __future__ import annotations
 
+import os
+import time
+
 from toolsmith.tally import tally, tally_dir
 
 SUITE_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -181,3 +184,150 @@ def test_the_cli_prints_a_line_per_results_directory_when_there_are_several(
     assert "library/aptTest" in out
     assert "library/test" in out
     assert "plugin/test" in out
+
+
+_DAY = 24 * 60 * 60
+
+
+def _touch(directory, when):
+    """Sets the modification time of every file under a directory."""
+    for path in directory.rglob("*"):
+        if path.is_file():
+            os.utime(path, (when, when))
+
+
+def _compiled(project, source_set, when, language="java"):
+    """Writes one compiled class into build/classes/<language>/<source_set>."""
+    classes = project / "build" / "classes" / language / source_set
+    (classes / "p").mkdir(parents=True, exist_ok=True)
+    (classes / "p" / f"{source_set}Probe.class").write_bytes(b"\xca\xfe\xba\xbe")
+    _touch(classes, when)
+
+
+def _stale_rerun(tmp_path):
+    """Lays out a library whose aptTest17 results predate the aptTest classes it ran.
+
+    aptTest17 runs aptTest's classes, so it has no class directory of its own
+    and is judged by the newest test class anywhere under the subproject.
+    """
+    now = time.time()
+    library = tmp_path / "library"
+    _suite(library / "build" / "test-results" / "test", "UnitTest", 3)
+    _suite(library / "build" / "test-results" / "aptTest", "AptTest", 5)
+    _suite(library / "build" / "test-results" / "aptTest17", "AptTest", 4,
+           failures=1, failing=["oldBreak"])
+    _touch(library / "build" / "test-results" / "test", now - 60)
+    _touch(library / "build" / "test-results" / "aptTest", now - 60)
+    _touch(library / "build" / "test-results" / "aptTest17", now - 3 * _DAY)
+    _compiled(library, "test", now - 120)
+    _compiled(library, "aptTest", now - 120)
+
+
+def test_a_results_directory_older_than_its_compiled_tests_is_listed_stale_and_left_out(tmp_path):
+    """A results directory an earlier run left behind must not reach the total."""
+    _stale_rerun(tmp_path)
+
+    result = tally_dir(tmp_path)
+
+    rows = {r["task"]: r for r in result["results"]}
+    assert set(rows) == {"aptTest", "aptTest17", "test"}
+    assert rows["aptTest17"]["stale"] is True
+    assert rows["aptTest"]["stale"] is False
+    assert rows["test"]["stale"] is False
+    assert rows["aptTest17"]["tests"] == 4
+    assert result["tests"] == 8
+    assert result["classes"] == 2
+    assert result["failures"] == 0
+    assert result["ok"] is True
+    assert result["failing_tests"] == []
+    assert result["failing_total"] == 0
+
+
+def test_every_row_carries_the_age_of_its_newest_result(tmp_path):
+    _stale_rerun(tmp_path)
+
+    rows = {r["task"]: r for r in tally_dir(tmp_path)["results"]}
+
+    assert 3 * _DAY - 60 <= rows["aptTest17"]["age_seconds"] <= 3 * _DAY + 60
+    assert 0 <= rows["aptTest"]["age_seconds"] <= 120
+
+
+def test_a_task_with_classes_of_its_own_name_is_judged_by_those_alone(tmp_path):
+    """Newer classes of another source set do not make a results directory stale."""
+    now = time.time()
+    library = tmp_path / "library"
+    _suite(library / "build" / "test-results" / "test", "UnitTest", 3)
+    _suite(library / "build" / "test-results" / "aptTest", "AptTest", 5)
+    _touch(library / "build" / "test-results" / "test", now - 2 * _DAY)
+    _touch(library / "build" / "test-results" / "aptTest", now - 2 * _DAY)
+    _compiled(library, "test", now - 3 * _DAY)
+    _compiled(library, "aptTest", now - _DAY, language="kotlin")
+
+    rows = {r["task"]: r for r in tally_dir(tmp_path)["results"]}
+
+    assert rows["test"]["stale"] is False
+    assert rows["aptTest"]["stale"] is True
+
+
+def test_production_classes_do_not_make_test_results_stale(tmp_path):
+    """The fallback compares against compiled TEST classes, and main is not one."""
+    now = time.time()
+    library = tmp_path / "library"
+    _suite(library / "build" / "test-results" / "aptTest17", "AptTest", 4)
+    _touch(library / "build" / "test-results" / "aptTest17", now - 2 * _DAY)
+    _compiled(library, "main", now - 60)
+
+    result = tally_dir(tmp_path)
+
+    assert result["results"][0]["stale"] is False
+    assert result["tests"] == 4
+
+
+def test_a_results_directory_with_no_compiled_classes_is_never_stale(tmp_path):
+    now = time.time()
+    _suite(tmp_path / "build" / "test-results" / "test", "OldTest", 6)
+    _touch(tmp_path / "build" / "test-results" / "test", now - 30 * _DAY)
+
+    result = tally_dir(tmp_path)
+
+    assert result["results"][0]["stale"] is False
+    assert result["tests"] == 6
+
+
+def test_the_cli_marks_a_stale_row_with_its_age(tmp_path, capsys, monkeypatch):
+    import argparse
+
+    from toolsmith import cli
+    from toolsmith import tally as tally_mod
+
+    _stale_rerun(tmp_path)
+    monkeypatch.setattr(tally_mod, "resolve_module", lambda m: tmp_path)
+    monkeypatch.setattr(tally_mod, "kind_of", lambda m: "gradle")
+
+    rc = cli._cmd_tally(argparse.Namespace(module="mod", fails=15))
+
+    lines = capsys.readouterr().out.splitlines()
+    assert rc == 0
+    assert lines[0].startswith("classes=2 tests=8 passed=8")
+    stale = [ln for ln in lines if "library/aptTest17" in ln]
+    assert len(stale) == 1 and "stale" in stale[0] and "3d" in stale[0]
+    assert not any("stale" in ln for ln in lines if "library/aptTest17" not in ln)
+    assert not any(ln.startswith("FAIL ") for ln in lines)
+
+
+def test_a_lone_stale_directory_still_prints_its_row(tmp_path, capsys, monkeypatch):
+    """A zero total with no row beside it would not say where the results went."""
+    from toolsmith import tally as tally_mod
+
+    now = time.time()
+    _suite(tmp_path / "build" / "test-results" / "test", "OldTest", 6)
+    _touch(tmp_path / "build" / "test-results" / "test", now - _DAY)
+    _compiled(tmp_path, "test", now - 60)
+    monkeypatch.setattr(tally_mod, "resolve_module", lambda m: tmp_path)
+    monkeypatch.setattr(tally_mod, "kind_of", lambda m: "gradle")
+
+    tally_mod._main(["mod"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("classes=0 tests=0 passed=0")
+    assert any("./test" in ln and "stale" in ln for ln in lines[1:])
