@@ -80,8 +80,9 @@ def _cmd_tally(args: argparse.Namespace) -> int:
     if not r.get("found"):
         print(f"tally: {r.get('note', 'not found')}")
         return 2
-    print(f"classes={r['classes']} tests={r['tests']} passed={r['passed']} "
-          f"skipped={r['skipped']} failures={r['failures']} errors={r['errors']}  ({r['module']})")
+    print(f"{tally_mod.summary_line(r)}  ({r['module']})")
+    for line in tally_mod.breakdown_lines(r):
+        print(line)
     for name in r["failing_tests"]:
         print(f"FAIL {name}")
     return 0 if r["ok"] else 1

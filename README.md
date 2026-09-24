@@ -136,14 +136,15 @@ A name's prefix marks **who can use** it rather than what it happens to parse: `
 | Name | Type | Default | What it is |
 |---|---|---|---|
 | `module` | `str` | *required* | alias, name, or path whose `test-results` to tally |
-| `subdir` | `str` | `""` | sub-path holding a nested build dir |
+| `subdir` | `str` | `""` | sub-path the search for results directories starts from |
 | `fails` | `int` | `15` | cap on the failing testcase names returned |
 
-**Result**: `classes`, `tests`, `passed`, `skipped`, `failures`, `errors`, `failing_tests[]`, `found`, `ok`, `module`.
+**Result**: the grand total `classes`, `tests`, `passed`, `skipped`, `failures`, `errors`, plus `failing_tests[]`, `failing_total`, `found`, `ok`, `module`, and `results[]` - one row per results directory, with its subproject `path` (`.` for the module root), its `task` and that directory's own counts.
 
 **Tips**
 
-- Replaces the recurring grep / awk / python one-liners over `build/test-results/test/*.xml`. Never hand-roll that again.
+- Reads every `build/test-results/<task>/*.xml` under the module: the root's own and each subproject's at any depth, for every test task (`test`, `aptTest`, `integrationTest`, ...). A multi-project build keeps nothing at the root, and is tallied whole. `.git`, `.gradle`, `node_modules` and the inside of a `build` directory are not searched for subprojects.
+- Replaces the recurring grep / awk / python one-liners over that XML. Never hand-roll that again.
 - The XML is whatever the last run left behind. If the tests restored from cache, the numbers are from an *earlier* run - `gradle_verify(rerun=True)` first.
 - `found: false` (with a `note`) means there is no XML at all, which is different from zero tests.
 
@@ -897,11 +898,12 @@ toolsmith java json_diff ... --phantom                          # the reverse di
 | `MODULE` | *required* | alias, name, or path |
 | `--fails N` | `15` | cap on the failing test names printed |
 
-**Result**: one `classes= tests= passed= skipped= failures= errors=` line, then a `FAIL <name>` line per failing test. Exit `0` green, `1` with failures or errors, `2` when there is no XML.
+**Result**: one `classes= tests= passed= skipped= failures= errors=` line for the grand total; where the module holds more than one results directory, an indented `<path>/<task>` line with that directory's counts per directory; then a `FAIL <name>` line per failing test. Exit `0` green, `1` with failures or errors, `2` when there is no XML.
 
 **Tips**
 
-- Never write an inline python or awk over `build/test-results/test/*.xml` again. This is that, correctly.
+- Every `build/test-results/<task>/` under the module counts - the root's and each subproject's at any depth, for every test task - so a multi-project build answers whole rather than "nothing ran".
+- Never write an inline python or awk over `build/test-results/*/*.xml` again. This is that, correctly.
 - The XML is from the *last* run. If it restored from cache, re-run with `gradle verify --rerun` first.
 
 **Also as** the `gradle_tally` MCP tool.
