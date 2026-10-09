@@ -8,6 +8,9 @@ General-purpose Java workspace dev toolkit for AI agents, packaged as a Claude C
 - `toolsmith.discovery` - scan a root for gradle modules, assign shorthands, write/read the cache, resolve the active root
 - `toolsmith.modules` - cache-backed resolve_module / package_root / find_gradle_root / get_modules
 - `toolsmith.gradle` - gradle_verify (reliable exit code, noise/signal filter)
+  - **Task options bind to the LAST task of the run.** Gradle binds `--tests` and `--rerun` to the task written immediately before them, so they are spliced straight after the last task: the last one named, or `test` when none is (the default set's last). Under `compile_only` with no task named the default set ends in `compileTestJava`, so they are refused rather than bound to a compile task; a flag riding in `tasks` beside them is refused too. The tool cannot see a task's type, so `--tests` on a non-Test task is gradle's refusal (`Unknown command-line option '--tests'`), not the tool's. `-DKEY=VALUE` and `--rerun-tasks` follow the base flags, since gradle lifts an option it knows out of any position.
+  - **A bare `-D KEY` is refused**: gradle reads it as the empty string, which `Boolean.getBoolean` reads as false. A test pattern or property value holding a cmd.exe metacharacter (`" % ^ & | < > !` or a control character) is refused on every platform, because the Windows wrapper is a batch file and CPython escapes none of them for one.
+  - **Every argument holding `*` or `?` is quoted on the Windows command line.** java.exe's launcher globs an unquoted one against the gradle root's files, case-insensitively, and list2cmdline quotes only for whitespace - so bare, `--tests *Parity*` in a root holding `parity/` would reach gradle as `--tests parity`.
 - `toolsmith.tally` - gradle_tally (JUnit XML)
 - `toolsmith.imports` - java_reorder_imports (IntelliJ Default layout)
 - `toolsmith.javadoc` - the bundled javadoc auditor/normalizer
@@ -65,7 +68,7 @@ source, `gradle-verify-gate` says Gradle, a `gradle_*` tool says it needs a grad
 
 ## MCP tools
 - `gradle_modules()` -> discovered inventory (name, path, package, shorthand, buildable)
-- `gradle_verify(module, tasks?, tail=25, compile_only=False)`
+- `gradle_verify(module, tasks?, tail=25, compile_only=False, tests?[], rerun=False, rerun_tasks=False, system_properties?[])` -> module, tasks, argv, root, exit_code, ok, first_failure, lines, lines_kind. `tests` (each `--tests P`) and `rerun` (gradle's task-bound `--rerun`) bind to the LAST task - `test` when none is named, refused under `compile_only` with none named; `rerun_tasks` is the build-wide `--rerun-tasks`; `system_properties` are `KEY=VALUE`, passed as `-DKEY=VALUE`, a bare KEY refused. The CLI spells them `--tests`, `--rerun`, `--rerun-tasks` and `-D`, and prints the gradle command on stderr
 - `gradle_tally(module, subdir="", fails=15)`
 - `java_reorder_imports(paths[], check=False)`
 - `java_docs_normalize(paths[], fix=False, scope="all", prefix?[])`

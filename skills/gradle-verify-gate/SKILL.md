@@ -1,6 +1,6 @@
 ---
 name: gradle-verify-gate
-description: Run the standard Gradle verification gate (`./gradlew compileJava test`) over a Gradle module after a refactor phase, file rename, or exception migration. Auto-invoked after `java-bulk-rename`, after `java-exception-class-gen` drops a new file, after Edit batches touching `.java` files, or whenever a multi-phase plan declares a `Phase N -> verify` boundary. Prefers module-scoped `./gradlew :module:compileJava :module:test` over full `./gradlew build`; surfaces only the first failure cleanly; skips redundant re-runs when nothing has changed.
+description: Run the standard Gradle verification gate (`./gradlew compileJava test`) over a Gradle module after a refactor phase, file rename, or exception migration. Auto-invoked after `java-bulk-rename`, after `java-exception-class-gen` drops a new file, after Edit batches touching `.java` files, or whenever a multi-phase plan declares a `Phase N -> verify` boundary. Prefers module-scoped `./gradlew :module:compileJava :module:test` over full `./gradlew build`; surfaces only the first failure cleanly; skips redundant re-runs when nothing has changed. Also the route for a filtered (`--tests`), forced (`--rerun`) or `-D`-property test run: `toolsmith gradle verify` / `gradle_verify` places each where gradle binds it.
 auto_invoke: true
 tags: [java, gradle, build, verification, ci]
 ---
@@ -40,6 +40,39 @@ local edit.
 | Cross-module rename or package move | `./gradlew build` (root) |
 | Phase boundary in a multi-phase plan | Always invoke before commit; scope matches the phase |
 | Compile-only sanity check with IDE attached | Prefer `mcp__IntelliJ_IDE__get_file_problems` or `mcp__IntelliJ_IDE__build_project` - cheaper than gradle |
+| One test class, a forced re-run, or a run needing a system property | `toolsmith gradle verify MODULE :test --tests "*FooTest" --rerun -D key=value` |
+
+## Filtered, forced and property-carrying runs
+
+Run them through the tool rather than the wrapper - it keeps the true exit
+code, and it places each argument where gradle reads it:
+
+```bash
+toolsmith gradle verify MODULE :test --tests "*FooTest" --tests "Bar.baz" --rerun -D key=value
+```
+
+or `gradle_verify(module, tasks=[":test"], tests=["*FooTest"], rerun=True,
+system_properties=["key=value"])` over MCP.
+
+- **`--tests` and `--rerun` bind to the LAST task.** Gradle binds a task option
+  to the task written immediately before it, so the tool writes them straight
+  after the last task given and they apply to that task alone. Name the task
+  they are for last. With no task given they bind to `test`; under
+  `--compile-only` with no task given they are refused, since that default set
+  has no test task.
+- The tool cannot see a task's type: `--tests` on a task that is not a `Test`
+  task fails in gradle with `Unknown command-line option '--tests'`, and the
+  gate reports only `FAILURE: Build failed with an exception.` - check the task
+  named last.
+- `--rerun` re-runs the last task alone; `--rerun-tasks` re-runs the whole
+  graph, compilation included. Only the first is needed to stop a test task
+  restoring `FROM-CACHE`.
+- `-D KEY=VALUE` is repeatable and has no position. A property is no task input
+  unless the build declares one, so pair it with `--rerun` when a test must see
+  a new value. A bare `-D KEY` is refused: gradle reads it as the empty string,
+  which `Boolean.getBoolean` reads as `false`.
+- The CLI prints the command gradle received on stderr (`gradlew <args>`), and
+  the MCP result carries it as `argv` - read it to see where an option landed.
 
 ## Skip when
 

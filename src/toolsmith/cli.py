@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from collections.abc import Callable
 
@@ -60,10 +61,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 def _cmd_verify(args: argparse.Namespace) -> int:
     r = gradle.gradle_verify(args.module, tasks=args.tasks or None, tail=args.tail,
-                             compile_only=args.compile_only, rerun=args.rerun)
+                             compile_only=args.compile_only, tests=args.tests,
+                             rerun=args.rerun, rerun_tasks=args.rerun_tasks,
+                             system_properties=args.system_properties)
     if r.get("error"):
         print(r["error"], file=sys.stderr)
         return 2
+    # The command gradle was given, so where a task option landed - and that a
+    # -D reached it - can be read rather than inferred. A notice, so stderr.
+    print(f"gradlew {shlex.join(r['argv'])}", file=sys.stderr)
     # Flag a tail so it is not read as a summary - it is only the last few
     # lines the build happened to print, often from something it shelled out
     # to. On stderr so a piped stdout stays clean. See gradle_verify's docstring.
@@ -727,15 +733,31 @@ def _modules_args(parser: argparse.ArgumentParser) -> None:
 def _verify_args(parser: argparse.ArgumentParser) -> None:
     """Declares the arguments of `gradle verify`.
 
+    --tests and --rerun are gradle task options, which gradle binds to the task
+    written immediately before them, so the tool places them after the last
+    task given - the order they are typed in here does not move them.
+
     Args:
         parser: the parser to declare them on
     """
     parser.add_argument("module")
-    parser.add_argument("tasks", nargs="*")
+    parser.add_argument("tasks", nargs="*",
+                        help="gradle tasks, in order; --tests and --rerun bind to the last "
+                             "(default: compileJava test)")
     parser.add_argument("--tail", type=int, default=25)
     parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument("--tests", action="append", default=[], metavar="PATTERN",
+                        help="test filter for the last task, repeatable (gradle's --tests)")
     parser.add_argument("--rerun", action="store_true",
-                        help="force re-execution past up-to-date + build cache (--rerun-tasks)")
+                        help="re-execute the last task past up-to-date + build cache "
+                             "(gradle's --rerun)")
+    parser.add_argument("--rerun-tasks", action="store_true",
+                        help="re-execute EVERY task in the graph, compilation included "
+                             "(gradle's --rerun-tasks)")
+    parser.add_argument("-D", dest="system_properties", action="append", default=[],
+                        metavar="KEY=VALUE",
+                        help="JVM system property for the build, repeatable; passed as "
+                             "-DKEY=VALUE, and a bare KEY is refused")
 
 
 def _tally_args(parser: argparse.ArgumentParser) -> None:

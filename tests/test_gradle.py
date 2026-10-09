@@ -6,11 +6,15 @@ backstop, signal extraction - without needing Gradle or a JDK.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
 
-from toolsmith.gradle import gradle_verify
+import pytest
+
+from toolsmith import cli, server
+from toolsmith.gradle import _windows_command_line, gradle_verify
 
 ARGV_FILE = "argv.txt"
 
@@ -288,22 +292,25 @@ def test_compile_only_swaps_the_task_set(tmp_path):
     assert _argv(root)[:2] == ["compileJava", "compileTestJava"]
 
 
-def test_rerun_appends_flag_and_leaves_tasks_alone(tmp_path):
+def test_rerun_tasks_appends_flag_and_leaves_tasks_alone(tmp_path):
     """--rerun-tasks is a flag, not a task: it must never be task-scoped."""
     root = _fake_gradle(tmp_path)
-    result = gradle_verify(str(root), tasks=["test"], rerun=True)
+    result = gradle_verify(str(root), tasks=["test"], rerun_tasks=True)
 
     argv = _argv(root)
     assert "--rerun-tasks" in argv
+    assert "--rerun" not in argv
     assert result["tasks"] == ["test"]
     assert not any(a.startswith(":") for a in argv)
 
 
-def test_rerun_defaults_off(tmp_path):
+def test_both_reruns_default_off(tmp_path):
     root = _fake_gradle(tmp_path)
     gradle_verify(str(root), tasks=["test"])
 
-    assert "--rerun-tasks" not in _argv(root)
+    argv = _argv(root)
+    assert "--rerun-tasks" not in argv
+    assert "--rerun" not in argv
 
 
 def test_quiet_and_plain_console_always_passed(tmp_path):
@@ -328,3 +335,272 @@ def test_missing_wrapper_is_an_error(tmp_path):
 
     assert result["ok"] is False
     assert "error" in result
+
+
+def test_an_empty_task_list_takes_the_defaults(tmp_path):
+    """An empty list names no task, the same as an omitted one."""
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tasks=[])
+
+    assert _argv(root)[:2] == ["compileJava", "test"]
+
+
+def test_the_result_carries_the_argv_gradle_received(tmp_path):
+    root = _fake_gradle(tmp_path)
+    result = gradle_verify(str(root), tasks=["test"], tests=["*A"], system_properties=["k=v"])
+
+    assert result["argv"] == _argv(root)
+
+
+# --------------------------------------------------------------------------
+# Task options and system properties. Gradle binds a task option to the task
+# written immediately before it, so --tests and --rerun must land straight
+# after the last task; a -D has no position.
+# --------------------------------------------------------------------------
+
+def test_task_options_follow_the_last_task_in_the_order_given(tmp_path):
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tasks=["compileJava", "test"],
+                  tests=["*WidgetTest", "Gadget.spins"], rerun=True)
+
+    assert _argv(root) == ["compileJava", "test",
+                           "--tests", "*WidgetTest", "--tests", "Gadget.spins", "--rerun",
+                           "-q", "--console=plain"]
+
+
+def test_task_options_bind_to_test_when_no_task_is_named(tmp_path):
+    """The default set ends in test, which is what a filter on the gate means."""
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tests=["*WidgetTest"], rerun=True)
+
+    assert _argv(root)[:5] == ["compileJava", "test", "--tests", "*WidgetTest", "--rerun"]
+
+
+def test_a_named_task_carries_task_options_under_compile_only(tmp_path):
+    """compile_only picks a DEFAULT set; a named task replaces it."""
+    root = _fake_gradle(tmp_path)
+    result = gradle_verify(str(root), tasks=["test"], compile_only=True, tests=["*A"])
+
+    assert result["ok"] is True
+    assert _argv(root)[:3] == ["test", "--tests", "*A"]
+
+
+def test_rerun_binds_to_the_task_and_rerun_tasks_to_the_build(tmp_path):
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tasks=["test"], rerun=True, rerun_tasks=True)
+
+    argv = _argv(root)
+    assert argv[:2] == ["test", "--rerun"]
+    assert argv.index("--rerun-tasks") > argv.index("--console=plain")
+
+
+def test_system_properties_become_dash_d_flags_after_everything_else(tmp_path):
+    """Repeatable, in order, and an '=' inside the value belongs to the value."""
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tasks=[":test"], tests=["*ParityReferencesTest"], rerun=True,
+                  system_properties=["asset.parity.regenerateViews=true", "empty=",
+                                     "joined=a=b", "spaced=two words"])
+
+    assert _argv(root) == [":test", "--tests", "*ParityReferencesTest", "--rerun",
+                           "-q", "--console=plain",
+                           "-Dasset.parity.regenerateViews=true", "-Dempty=",
+                           "-Djoined=a=b", "-Dspaced=two words"]
+
+
+def test_a_wildcard_argument_is_quoted_on_the_windows_command_line():
+    """java.exe on Windows globs an UNQUOTED * or ? against the gradle root's files.
+
+    Case-insensitively, so --tests *Parity* in a root holding parity/ reached
+    gradle as --tests parity. Quoted, the launcher strips the quotes and
+    leaves the pattern alone; everything without a wildcard is quoted exactly
+    as list2cmdline would.
+    """
+    line = _windows_command_line(["C:/w/gradlew.bat", ":test", "--tests", "*Parity*",
+                                  "--tests", "Gadget?", "--tests", "trail*\\",
+                                  "-Dk=two words*", "-Dplain=v", "--rerun"])
+
+    assert line == ('C:/w/gradlew.bat :test --tests "*Parity*" --tests "Gadget?" '
+                    '--tests "trail*\\\\" "-Dk=two words*" -Dplain=v --rerun')
+
+
+def test_a_quoted_wildcard_reaches_the_wrapper_unquoted(tmp_path):
+    """The quoting is for the launcher only - what arrives is the pattern itself."""
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tasks=["test"], tests=["*Widget*", "Gadget?", "trail*\\"],
+                  system_properties=["k=two words*"])
+
+    assert _argv(root) == ["test", "--tests", "*Widget*", "--tests", "Gadget?",
+                           "--tests", "trail*\\", "-q", "--console=plain", "-Dk=two words*"]
+
+
+def test_task_options_are_never_task_scoped_for_a_subproject(tmp_path, monkeypatch):
+    """Only the tasks take the ':module:' prefix - an option given it is a task name."""
+    root = _fake_gradle(tmp_path)
+    (root / "widgets").mkdir()
+    _seed(monkeypatch, root,
+          {"shorthand": "w", "name": "widgets", "path": "widgets", "kind": "gradle",
+           "repo": False, "package": None, "buildable": True})
+
+    result = gradle_verify("widgets", tasks=["test"], tests=["*A"], rerun=True,
+                           system_properties=["k=v"])
+
+    assert result["tasks"] == [":widgets:test"]
+    assert _argv(root) == [":widgets:test", "--tests", "*A", "--rerun",
+                           "-q", "--console=plain", "-Dk=v"]
+
+
+# --------------------------------------------------------------------------
+# The refusals. Each one is decided before anything runs, so the wrapper
+# never writes its argv file.
+# --------------------------------------------------------------------------
+
+def _refused(root: Path, result: dict) -> str:
+    """Asserts a call was refused without running gradle and returns the reason."""
+    assert result["ok"] is False
+    assert not (root / ARGV_FILE).exists()
+    return result["error"]
+
+
+def test_task_options_are_refused_under_compile_only_with_no_task_named(tmp_path):
+    """That default set ends in compileTestJava: no test task to filter or rerun."""
+    root = _fake_gradle(tmp_path)
+
+    assert "compile-only" in _refused(root, gradle_verify(str(root), compile_only=True,
+                                                          tests=["*A"]))
+    assert "compile-only" in _refused(root, gradle_verify(str(root), compile_only=True,
+                                                          rerun=True))
+
+
+def test_a_flag_in_tasks_is_refused_beside_task_options(tmp_path):
+    root = _fake_gradle(tmp_path)
+
+    error = _refused(root, gradle_verify(str(root), tasks=["test", "--info"], tests=["*A"]))
+    assert "'--info'" in error
+
+
+def test_a_flag_in_tasks_still_runs_without_task_options(tmp_path):
+    """The refusal guards the binding, so a run with nothing to bind is left alone."""
+    root = _fake_gradle(tmp_path)
+    gradle_verify(str(root), tasks=["test", "--info"])
+
+    assert _argv(root)[:2] == ["test", "--info"]
+
+
+@pytest.mark.parametrize("pattern, reason", [
+    ("", "empty"),
+    ("   ", "empty"),
+    ("-WidgetTest", "starts with '-'"),
+    ('Widget"Test', "cmd.exe"),
+    ("Widget%PATH%", "cmd.exe"),
+    ("Widget&calc", "cmd.exe"),
+    ("Widget|more", "cmd.exe"),
+    ("Widget\nTest", "cmd.exe"),
+])
+def test_a_malformed_test_pattern_is_refused(tmp_path, pattern, reason):
+    root = _fake_gradle(tmp_path)
+
+    assert reason in _refused(root, gradle_verify(str(root), tasks=["test"], tests=[pattern]))
+
+
+def test_a_bare_system_property_is_refused_with_the_spelling_to_use(tmp_path):
+    """A bare -DKEY is the empty string, which Boolean.getBoolean reads as false."""
+    root = _fake_gradle(tmp_path)
+
+    error = _refused(root, gradle_verify(str(root), system_properties=["regenerateViews"]))
+    assert "regenerateViews=true" in error
+
+
+@pytest.mark.parametrize("entry, reason", [
+    ("-Dkey=value", "without the -D"),
+    ("=value", "property name"),
+    ("two words=value", "property name"),
+    ("9lives=value", "property name"),
+    ("key=a&calc", "cmd.exe"),
+    ("key=%PATH%", "cmd.exe"),
+    ('key="quoted"', "cmd.exe"),
+    ("key=a\nb", "cmd.exe"),
+])
+def test_a_malformed_system_property_is_refused(tmp_path, entry, reason):
+    root = _fake_gradle(tmp_path)
+
+    assert reason in _refused(root, gradle_verify(str(root), system_properties=[entry]))
+
+
+def test_an_argument_is_refused_before_the_module_is_resolved(tmp_path):
+    """A malformed argument is wrong whichever module it was aimed at."""
+    result = gradle_verify(str(tmp_path / "does-not-exist"), system_properties=["bare"])
+
+    assert result["ok"] is False
+    assert "bare=true" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# The CLI row and the MCP tool. Both forward to gradle_verify, so what is
+# pinned here is that every argument reaches it - through argparse on one side
+# and through the tool's schema on the other.
+# --------------------------------------------------------------------------
+
+def test_the_cli_parses_task_options_and_repeatable_properties():
+    args = cli.build_parser().parse_args(
+        ["gradle", "verify", "utils", ":test", "--tests", "*A", "--tests", "B",
+         "--rerun", "--rerun-tasks", "-Da.b=c", "-D", "x=y"])
+
+    assert (args.module, args.tasks, args.tests, args.rerun, args.rerun_tasks,
+            args.system_properties) == ("utils", [":test"], ["*A", "B"], True, True,
+                                        ["a.b=c", "x=y"])
+
+
+def test_the_cli_runs_the_command_it_prints(tmp_path, capsys):
+    """The printed command is on stderr, and it is the argv gradle received."""
+    root = _fake_gradle(tmp_path)
+
+    code = cli.main(["gradle", "verify", str(root), ":test", "--tests", "*Widget*",
+                     "--rerun", "-Dk=v"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert _argv(root) == [":test", "--tests", "*Widget*", "--rerun",
+                           "-q", "--console=plain", "-Dk=v"]
+    assert "gradlew :test --tests '*Widget*' --rerun -q --console=plain -Dk=v" in captured.err
+    assert captured.out.splitlines()[-1] == "GATE: PASS rc=0"
+
+
+def test_a_cli_refusal_is_a_precondition_exit(tmp_path, capsys):
+    root = _fake_gradle(tmp_path)
+
+    code = cli.main(["gradle", "verify", str(root), "-D", "bare"])
+
+    assert code == 2
+    assert "bare=true" in capsys.readouterr().err
+    assert not (root / ARGV_FILE).exists()
+
+
+def test_the_mcp_tool_forwards_every_argument_to_gradle(tmp_path):
+    """The tool function is what the server calls; the schema test below pins
+    that the server advertises each of these names."""
+    root = _fake_gradle(tmp_path)
+
+    server.gradle_verify(str(root), tasks=[":test"], tests=["*A", "B"], rerun=True,
+                         rerun_tasks=True, system_properties=["k=v", "e="])
+
+    assert _argv(root) == [":test", "--tests", "*A", "--tests", "B", "--rerun",
+                           "-q", "--console=plain", "--rerun-tasks", "-Dk=v", "-De="]
+
+
+def test_the_mcp_tool_returns_a_refusal_rather_than_running(tmp_path):
+    root = _fake_gradle(tmp_path)
+
+    result = server.gradle_verify(str(root), compile_only=True, tests=["*A"])
+
+    assert "compile-only" in _refused(root, result)
+
+
+def test_the_mcp_tool_states_the_binding_rule_where_an_agent_reads_it():
+    """The docstring is the tool description, which is what gets matched and read."""
+    tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+    tool = tools["gradle_verify"]
+
+    assert {"tests", "rerun", "rerun_tasks", "system_properties"} <= set(
+        tool.inputSchema["properties"])
+    assert "LAST task" in tool.description
+    assert "immediately before" in tool.description

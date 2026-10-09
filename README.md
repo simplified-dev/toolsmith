@@ -108,18 +108,25 @@ A name's prefix marks **who can use** it rather than what it happens to parse: `
 | Name | Type | Default | What it is |
 |---|---|---|---|
 | `module` | `str` | *required* | alias (`ar`), name (`asset-renderer`), or path |
-| `tasks` | `list[str]` | `compileJava test` | the gradle tasks to run |
+| `tasks` | `list[str]` | `compileJava test` | the gradle tasks to run, in order |
 | `tail` | `int` | `25` | how many de-noised trailing lines come back |
 | `compile_only` | `bool` | `False` | use `compileJava compileTestJava` as the default task set |
-| `rerun` | `bool` | `False` | force past up-to-date checks and the build cache (`--rerun-tasks`) |
+| `tests` | `list[str]` | none | test filter patterns for the last task, each passed as `--tests PATTERN` |
+| `rerun` | `bool` | `False` | gradle's `--rerun` on the last task: it executes past its up-to-date check and the build cache |
+| `rerun_tasks` | `bool` | `False` | `--rerun-tasks`: every task in the graph executes, compilation included |
+| `system_properties` | `list[str]` | none | JVM system properties, each `KEY=VALUE`, passed as `-DKEY=VALUE` |
 
-**Result**: `module`, `tasks`, `root`, `exit_code`, `ok`, `first_failure`, `lines`, `lines_kind`. On a timeout `ok` is `False`, `exit_code` is `None` and `timed_out` is `True`.
+**Result**: `module`, `tasks`, `argv` (every argument gradle was given), `root`, `exit_code`, `ok`, `first_failure`, `lines`, `lines_kind`. On a timeout `ok` is `False`, `exit_code` is `None` and `timed_out` is `True`. A refused argument returns `ok: False` and an `error`, and runs nothing.
 
 **Tips**
 
 - **Read `lines_kind` before reading `lines`.** `signal` means the lines matched as failure diagnostics. `tail` means nothing matched, so these are just the last few lines the build happened to print - often unrelated chatter from whatever it shelled out to, and *not* a summary. `empty` is normal for a clean `-q` run and is not evidence the build no-opped.
 - `lines` is **never** a test tally. Counts printed there come from whatever the build spawned. Use `gradle_tally` for real numbers.
-- `rerun` is what makes tests actually execute instead of restoring `FROM-CACHE`. A `clean` task does not do this.
+- **`tests` and `rerun` bind to the LAST task of the run.** Gradle binds a task option to the task written immediately before it, so the tool places them straight after the last task, and they apply to that task alone - name the task they are for last, as in `tasks=[":test"]`. With no task named they bind to `test`, the last of the default set. Under `compile_only` with no task named that set ends in `compileTestJava`, so they are refused; so is a flag riding in `tasks` beside them.
+- The tool cannot see a task's type. `tests` bound to a task that is not a `Test` task fails the build in gradle with `Unknown command-line option '--tests'`.
+- `rerun` is what makes tests actually execute instead of restoring `FROM-CACHE`, and only the last task pays for it. `rerun_tasks` forces the whole graph. A `clean` task does neither.
+- `system_properties` have no position and reach the build's JVM. A forked test JVM sees one only where the build script forwards it, and a property is no task input unless the build declares it, so pair one with `rerun` when a test must see a new value. A bare `KEY` is refused, because gradle reads `-DKEY` as the empty string and `Boolean.getBoolean` reads that as `false`; write `KEY=true`, or `KEY=` for an empty value.
+- A test pattern or a property value holding `"`, `%`, `^`, `&`, `|`, `<`, `>`, `!` or a control character is refused on every platform: the Windows wrapper is a batch file, and cmd.exe expands or splits on those. An argument holding `*` or `?` is quoted on the Windows command line, because java.exe's launcher would otherwise glob it against the gradle root's files.
 - A module whose `kind` is not gradle is refused **before** the gradle-root walk, because that walk goes *up*: a python project under a directory holding a `gradlew` would otherwise resolve a sibling project's wrapper and run a different build.
 
 **Also as** `toolsmith gradle verify`, and the `gradle-verify-gate` skill.
@@ -581,6 +588,7 @@ The plugin ships these so they travel with it. They stay skills rather than MCP 
 |---|---|
 | the module | which module to gate |
 | the tasks | defaults to `compileJava test` |
+| test filters, a rerun, system properties | optional; `--tests` and `--rerun` bind to the last task |
 
 **Result**: a pass / fail verdict with the first failure surfaced cleanly.
 
@@ -680,6 +688,7 @@ toolsmith java docs --fix src        # javadoc audit / fix
 toolsmith java json_diff --json capture.json --src src/main/java/pkg --root Member
 toolsmith gradle modules             # print the cached inventory
 toolsmith gradle verify ar test      # module-scoped gradle gate (alias or name)
+toolsmith gradle verify ar :test --tests "*FooTest" --rerun -D key=value   # filtered, forced, with a property
 toolsmith gradle tally d4j           # JUnit tally
 toolsmith jitpack status d4j         # are the module's commits built (read-only)
 toolsmith jitpack build d4j          # trigger + wait for one build; prints the strictly(<sha>) pin
@@ -869,18 +878,23 @@ toolsmith java json_diff ... --phantom                          # the reverse di
 | Name | Default | What it is |
 |---|---|---|
 | `MODULE` | *required* | alias, name, or path |
-| `TASKS...` | `compileJava test` | gradle tasks to run |
+| `TASKS...` | `compileJava test` | gradle tasks to run, in order |
 | `--tail N` | `25` | de-noised trailing lines to print |
 | `--compile-only` | off | use `compileJava compileTestJava` instead |
-| `--rerun` | off | force past up-to-date and the build cache (`--rerun-tasks`) |
+| `--tests PATTERN` | none | test filter for the last task, repeatable (gradle's `--tests`) |
+| `--rerun` | off | gradle's `--rerun` on the last task: it executes past its up-to-date check and the build cache |
+| `--rerun-tasks` | off | every task in the graph executes, compilation included |
+| `-D KEY=VALUE` | none | JVM system property, repeatable, passed as `-DKEY=VALUE`; `-DKEY=VALUE` works too |
 
-**Result**: the signal lines, then `GATE: PASS rc=0` or `GATE: FAIL rc=N`. Exit `0` pass, `1` fail, `2` precondition.
+**Result**: the gradle command on stderr (`gradlew <args>`), the signal lines, then `GATE: PASS rc=0` or `GATE: FAIL rc=N`. Exit `0` pass, `1` fail, `2` precondition - a refused argument is a `2`, with its reason on stderr.
 
 **Tips**
 
 - Replaces `cd MODULE && ./gradlew ... 2>&1 | grep -vE incubating | tail -N; echo PIPESTATUS`, which loses the true exit code. Do not hand-roll it.
 - When no failure diagnostics matched, the printed lines are just a tail, and a `-- trailing build output, not a summary --` line says so **on stderr** so a piped stdout stays clean.
-- `--rerun` is what makes tests actually run rather than restoring `FROM-CACHE`.
+- **`--tests` and `--rerun` bind to the last task given**, wherever they are typed: gradle binds a task option to the task written immediately before it, and the tool writes them there. `toolsmith gradle verify ar :test --tests "*FooTest" --rerun -D key=value` runs `gradlew :test --tests *FooTest --rerun -q --console=plain -Dkey=value`, and the stderr line shows where each landed. With no task given they bind to `test`; under `--compile-only` with no task given they are refused.
+- `--rerun` is what makes tests actually run rather than restoring `FROM-CACHE`, and only the last task pays for it; `--rerun-tasks` forces the whole graph.
+- A `-D` property is no task input unless the build declares one, so pair it with `--rerun` when a test must see a new value. A bare `-D KEY` is refused - gradle would read it as the empty string, which `Boolean.getBoolean` reads as `false`.
 - A non-gradle module is refused before the gradle-root walk, because that walk goes up and would find a sibling project's wrapper.
 
 **Also as** the `gradle_verify` MCP tool and the `gradle-verify-gate` skill.
