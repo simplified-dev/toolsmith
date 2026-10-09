@@ -49,12 +49,21 @@ def gradle_verify(
     with no task named (that default set has no test task), and a flag inside
     `tasks` beside them. The tool cannot see a task's type, so `tests` bound to
     a task that is not a Test task fails the build in gradle ("Unknown
-    command-line option '--tests'"). `system_properties` have no position and
-    apply to the whole build.
+    command-line option '--tests'"), which comes back as first_failure.
+    `system_properties` have no position and apply to the whole build.
+
+    Tasks are relative to the module. A module that is its own gradle root
+    takes them as written; for one without a wrapper of its own (a
+    subproject) each is scoped by its project path, read off its directory
+    under the gradle root, with a leading ':' dropped first - so for
+    <root>/tooling, "test" and ":test" both run ":tooling:test". A task of the
+    root project is run by naming the root as the module.
 
     Args:
         module: module alias (e.g. "ar"), name ("asset-renderer"), or path.
-        tasks: gradle tasks to run, in order. Defaults to compileJava+test.
+        tasks: gradle tasks to run, in order, relative to the module. Defaults
+            to compileJava+test. A task holding a character cmd.exe acts on
+            (" % ^ & | < > ! or a control character) is refused.
         tail: how many signal / de-noised trailing lines to return.
         compile_only: use compileJava+compileTestJava as the default task set.
         tests: test filter patterns for the last task, each passed as
@@ -79,8 +88,14 @@ def gradle_verify(
         False, exit_code is None, and timed_out is True. A refused argument
         returns ok False and an error, and runs nothing.
 
+        first_failure is the first compile error or failing test where the
+        build printed one, and otherwise the reason gradle gave under
+        "* What went wrong:" - such as "Task 'x' not found in root project
+        'y'." - with gradle's bare "FAILURE:" verdict only when it gave none.
+
         Check lines_kind before reading anything into `lines`:
-          "signal" - lines matched as failure diagnostics. Meaningful.
+          "signal" - lines matched as failure diagnostics, and gradle's
+                     "* What went wrong:" block whole. Meaningful.
           "tail"   - no diagnostics matched, so this is just the last few
                      non-noise lines the build happened to print. It is NOT a
                      summary or a verdict, and on a passing run it is usually

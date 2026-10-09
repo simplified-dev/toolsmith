@@ -742,8 +742,8 @@ def _verify_args(parser: argparse.ArgumentParser) -> None:
     """
     parser.add_argument("module")
     parser.add_argument("tasks", nargs="*",
-                        help="gradle tasks, in order; --tests and --rerun bind to the last "
-                             "(default: compileJava test)")
+                        help="gradle tasks, in order and relative to the module; --tests and "
+                             "--rerun bind to the last (default: compileJava test)")
     parser.add_argument("--tail", type=int, default=25)
     parser.add_argument("--compile-only", action="store_true")
     parser.add_argument("--tests", action="append", default=[], metavar="PATTERN",

@@ -61,9 +61,14 @@ system_properties=["key=value"])` over MCP.
   `--compile-only` with no task given they are refused, since that default set
   has no test task.
 - The tool cannot see a task's type: `--tests` on a task that is not a `Test`
-  task fails in gradle with `Unknown command-line option '--tests'`, and the
-  gate reports only `FAILURE: Build failed with an exception.` - check the task
-  named last.
+  task fails in gradle, and the gate reports gradle's reason as its first
+  failure - `Problem configuring task :compileJava from command line. >
+  Unknown command-line option '--tests'.` - so check the task named last.
+- **Tasks are relative to the module.** A module without a wrapper of its own
+  (`tooling` under `asset-renderer`) has each task scoped by the project path
+  its directory spells under the gradle root, with a leading `:` dropped
+  first: `toolsmith gradle verify tooling :test` runs `:tooling:test`, not the
+  root's `:test`. Run a root task by naming the root as the module.
 - `--rerun` re-runs the last task alone; `--rerun-tasks` re-runs the whole
   graph, compilation included. Only the first is needed to stop a test task
   restoring `FROM-CACHE`.
@@ -91,6 +96,9 @@ Surface only the first compile error or first failing test:
 
 - File + line + message for compile errors.
 - Test class + method + assertion message for test failures.
+- Gradle's reason under `* What went wrong:` for a failure that printed
+  neither - an unknown task, an option the task does not take, a test filter
+  that matched nothing. The gate's `first_failure` carries it.
 
 If there are multiple failures, report the count and show the first one;
 direct the user to the full log only if they ask. Avoid dumping the entire

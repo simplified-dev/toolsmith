@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import tempfile
+from pathlib import Path
 
 from .modules import find_gradle_root, kind_of, resolve_module, workspace_root
 
@@ -63,16 +64,28 @@ _SIGNAL = re.compile(
 # '-D-Dkey=v'.
 _SYSTEM_PROPERTY = re.compile(r"([A-Za-z_][A-Za-z0-9_.\-]*)=(.*)", re.S)
 
-# Characters a test pattern or a property value may not carry. On Windows the
-# wrapper is a batch file, so the command line goes through cmd.exe, which
-# expands %VAR% even inside quotes and splits on & | < > outside them - and
-# CPython escapes none of it for a batch file. A value holding one is either
+# Characters a task, a test pattern or a property value may not carry. On
+# Windows the wrapper is a batch file, so the command line goes through cmd.exe,
+# which expands %VAR% even inside quotes and splits on & | < > outside them -
+# and CPython escapes none of it for a batch file. A value holding one is either
 # mangled or runs a second command, so it is refused on every platform, which
 # keeps one call meaning one thing wherever it runs.
 _CMD_META = re.compile(r'["%^&|<>!\x00-\x1f]')
 
 # The characters java.exe's Windows launcher globs on.
 _WILDCARD = re.compile(r"[*?]")
+
+# The heading gradle prints above its reason for failing a build. The lines
+# under it, up to a blank line or the next '* ' section ('* Try:'), are that
+# reason: what failed on the first, then the causes beneath it, each marked
+# '>'. A configuration failure - an unknown task, an option the task does not
+# take, a bad property value - prints nothing else that names its cause.
+_REASON_HEADING = "* What went wrong:"
+
+# Gradle's verdict on a failed build ('FAILURE: Build failed with an
+# exception.', 'FAILURE: Build completed with 2 failures.'), which names no
+# cause.
+_VERDICT = re.compile(r"^FAILURE: ")
 
 
 def _windows_command_line(args: list[str]) -> str:
@@ -102,6 +115,142 @@ def _windows_command_line(args: list[str]) -> str:
             plain = '"' + plain + "\\" * trailing + '"'
         parts.append(plain)
     return " ".join(parts)
+
+
+def _check_tasks(tasks: list[str]) -> None:
+    """Refuses a task carrying a character the Windows wrapper's cmd.exe acts on.
+
+    A gradle task path is letters, digits and a few separators ('-', '_', '.',
+    ':'), so no real task is lost, and a task such as 'test&calc' would run a
+    second command through gradlew.bat. Refused on every platform, as a test
+    pattern or a property value holding one is.
+
+    Args:
+        tasks: the tasks of the run
+
+    Raises:
+        ValueError: naming the first task that carries one
+    """
+    for task in tasks:
+        bad = _CMD_META.search(task)
+        if bad:
+            raise ValueError(f"task '{task}' holds {bad.group()!r}, which the Windows wrapper's "
+                             f"cmd.exe expands or splits on - a gradle task path is letters, "
+                             f"digits, '-', '_', '.' and ':'")
+
+
+def _project_path(mod_dir: Path, root: Path) -> str:
+    """Returns a module's gradle project path, from where it sits under its gradle root.
+
+    Gradle maps a project path onto the directory layout by default -
+    include("a:b") is <root>/a/b - so the directory names the project, where
+    the alias or name the caller typed names it only while gradle happens to
+    accept that as an abbreviation. A settings script that moves a project's
+    directory elsewhere is not read.
+
+    Args:
+        mod_dir: the module's directory
+        root: its gradle root, resolved, as find_gradle_root returns it
+
+    Returns:
+        the project path, e.g. ':tooling' or ':a:b', or '' for a module that
+        is its own gradle root
+    """
+    rel = mod_dir.resolve().relative_to(root)
+    return "".join(f":{part}" for part in rel.parts)
+
+
+def _scoped(tasks: list[str], project: str) -> list[str]:
+    """Scopes the tasks of a run to the module's project.
+
+    Every task is relative to the module named. A module that is its own
+    gradle root takes its tasks as written. For any other a leading ':' is
+    dropped and the project path put in front, so 'test' and ':test' both
+    name the module's own test and ':sub:test' its child's. That is what a
+    leading ':' means for a root module - its own project rather than every
+    project - so one spelling means one thing whichever module it is aimed
+    at. A task of the root project, or of a sibling, is run by naming that
+    project as the module. A token starting with '-' is a flag rather than a
+    task, and is passed as written.
+
+    Args:
+        tasks: the tasks of the run, defaults already applied
+        project: the module's project path, '' for a root project
+
+    Returns:
+        the tasks as gradle is given them
+    """
+    if not project:
+        return list(tasks)
+    return [task if task.startswith("-") else f"{project}:{task.removeprefix(':')}"
+            for task in tasks]
+
+
+def _reason(block: list[str]) -> str:
+    """Joins a '* What went wrong:' block's first line and its '>' causes into one line.
+
+    The detail lines around the causes - compiler output gradle repeats, the
+    repositories a dependency was searched in - stay out, since they explain a
+    cause rather than state one.
+
+    Args:
+        block: the lines under the heading, at least one
+
+    Returns:
+        the reason, e.g. "Problem configuring task :compileJava from command
+        line. > Unknown command-line option '--tests'."
+    """
+    head, *rest = (line.strip() for line in block)
+    return " ".join([head, *(line for line in rest if line.startswith(">"))])
+
+
+def _diagnostics(lines: list[str]) -> tuple[list[str], str | None]:
+    """Picks a build's diagnostic lines out of its output, and the first failure among them.
+
+    A line is a diagnostic when it matches the signal pattern and not the noise
+    one, or when it sits in the block gradle heads '* What went wrong:' - the
+    heading and every line under it up to a blank line or the next '* '
+    section. The block is kept whole because it is gradle's own statement of
+    the cause, and for a configuration failure the only one.
+
+    The first failure is the first diagnostic, except that gradle's 'FAILURE:'
+    verdict gives way to anything naming a cause, and a block reads as its
+    reason (see _reason). So a compile error or a failing test printed before
+    the verdict stays first, a failure whose only cause is the block reports
+    that cause, and the verdict is the first failure only when the build gave
+    no reason at all.
+
+    Args:
+        lines: the build's output, one line per entry
+
+    Returns:
+        (the diagnostic lines in output order, the first failure or None)
+    """
+    signal: list[str] = []
+    first: str | None = None
+    verdict: str | None = None
+    block: list[str] | None = None
+    for line in lines:
+        if block is not None:
+            if line.strip() and not line.startswith("* "):
+                signal.append(line)
+                block.append(line)
+                continue
+            if block and first is None:
+                first = _reason(block)
+            block = None
+        if line.rstrip() == _REASON_HEADING:
+            signal.append(line)
+            block = []
+        elif _SIGNAL.search(line) and not _NOISE.search(line):
+            signal.append(line)
+            if _VERDICT.match(line):
+                verdict = verdict or line
+            elif first is None:
+                first = line
+    if block and first is None:
+        first = _reason(block)
+    return signal, first or verdict
 
 
 def _task_options(tasks: list[str], named: bool, compile_only: bool,
@@ -214,11 +363,19 @@ def gradle_verify(
     the default set. System properties carry no position and apply to the
     whole build.
 
+    Tasks are relative to the module. A module that is its own gradle root
+    takes them as written; one without a wrapper of its own has each scoped by
+    its project path, read off where it sits under the gradle root, with a
+    leading ':' dropped first - so for <root>/tooling, 'test' and ':test' both
+    run ':tooling:test'. A task of the root project is run by naming the root
+    as the module. See _scoped.
+
     Args:
         module: module alias, name, or path (see toolsmith.modules).
         tasks: gradle tasks to run, in order. Defaults to compileJava+test, or
             compileJava+compileTestJava when compile_only is set; an empty
-            list takes the defaults too.
+            list takes the defaults too. A task carrying a character cmd.exe
+            acts on is refused.
         tail: how many signal (or de-noised trailing) lines to return.
         compile_only: use the compile-only default task set.
         tests: test filter patterns, each passed as --tests PATTERN to the last
@@ -242,9 +399,18 @@ def gradle_verify(
         True. A refused argument returns ok False and an error, and runs
         nothing.
 
+        first_failure is the first diagnostic: a compile error or failing test
+        where the build printed one ahead of gradle's 'FAILURE:' verdict, and
+        otherwise the reason gradle gave under '* What went wrong:' - the line
+        under the heading and the '>' causes beneath it, joined, such as
+        "Problem configuring task :compileJava from command line. > Unknown
+        command-line option '--tests'.". The bare verdict is the first failure
+        only when the build gave no reason.
+
         lines_kind says what `lines` actually holds, and must be checked before
         reading anything into it:
-          "signal" - lines matched as failure diagnostics. Meaningful.
+          "signal" - lines matched as failure diagnostics, and gradle's
+                     '* What went wrong:' block whole. Meaningful.
           "tail"   - no diagnostics matched, so this is just the last few
                      non-noise lines the build happened to print. It is NOT a
                      summary or a verdict, and on a passing run it is usually
@@ -263,6 +429,7 @@ def gradle_verify(
     # Refused before the module is resolved: a malformed argument is wrong
     # whichever module it was aimed at, and nothing has run yet.
     try:
+        _check_tasks(tasks)
         task_options = _task_options(tasks, named, compile_only, list(tests or ()), rerun)
         property_flags = _system_property_flags(list(system_properties or ()))
     except ValueError as refusal:
@@ -289,14 +456,14 @@ def gradle_verify(
                 "error": f"no gradle wrapper found upward from {mod_dir}"}
 
     # A standalone repo IS the root project -> unscoped tasks. Only a genuine
-    # subproject (root above the module dir) needs the ':module:task' form.
-    invoke = tasks if root == mod_dir else [f":{module}:{t}" for t in tasks]
+    # subproject (root above the module dir) is scoped, by the project path its
+    # directory spells under the root rather than by the token the caller typed.
+    invoke = _scoped(tasks, _project_path(mod_dir, root))
     gradlew = str(root / ("gradlew.bat" if os.name == "nt" else "gradlew"))
 
-    # Base flags. --rerun-tasks goes HERE, not in `invoke`: for a subproject
-    # every `invoke` element is wrapped as ':module:task', which would mangle a
-    # flag. It forces every task in the graph past both up-to-date checks and
-    # the build cache.
+    # Base flags. --rerun-tasks goes HERE, not in `invoke`: it is a build-wide
+    # option rather than a task, and forces every task in the graph past both
+    # up-to-date checks and the build cache.
     flags = ["-q", "--console=plain"]
     if rerun_tasks:
         flags.append("--rerun-tasks")
@@ -369,7 +536,7 @@ def gradle_verify(
     # build last printed". They are not interchangeable, so the caller is told
     # which one it got - an unlabelled tail reads as a summary and gets
     # believed. See lines_kind in the docstring.
-    signal = [ln for ln in lines if _SIGNAL.search(ln) and not _NOISE.search(ln)]
+    signal, first_failure = _diagnostics(lines)
     if signal:
         kept, kind = signal[:tail], "signal"
     else:
@@ -397,7 +564,7 @@ def gradle_verify(
         "root": str(root),
         "exit_code": returncode,
         "ok": returncode == 0,
-        "first_failure": signal[0] if signal else None,
+        "first_failure": first_failure,
         "lines": kept,
         "lines_kind": kind,
     }

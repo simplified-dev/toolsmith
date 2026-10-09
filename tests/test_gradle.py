@@ -258,6 +258,233 @@ def test_signal_is_capped(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Gradle's reason. A configuration failure prints nothing that matches a
+# diagnostic but the 'FAILURE:' verdict, so the gate reported rc=1 and that
+# line alone while gradle had named the cause under '* What went wrong:'.
+#
+# The output below is real gradle 9.4.1 under -q --console=plain: the first
+# three from the utils module, the last two from a throwaway project holding
+# one failing test and one compile error, with its long path shortened. It is
+# written with \n, and the stand-in wrapper prints in text mode, so on Windows
+# it arrives CRLF-terminated as gradle's own did.
+# --------------------------------------------------------------------------
+
+_TESTS_ON_A_COMPILE_TASK = """
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Problem configuring task :compileJava from command line.
+> Unknown command-line option '--tests'.
+
+* Try:
+> Run gradlew help --task :compileJava to get task usage details.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 542ms
+"""
+
+_UNKNOWN_TASK = """
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Task 'noSuchTask' not found in root project 'utils'.
+
+* Try:
+> Run gradlew tasks to get a list of available tasks.
+> For more on name expansion, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:name_abbreviation in the Gradle documentation.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 520ms
+"""
+
+_NO_TESTS_FOUND = """
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':test'.
+> No tests found for given includes: [*NoSuchTestAnywhere*](--tests filter)
+
+* Try:
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 1s
+"""
+
+_FAILING_TESTS = """
+2 tests completed, 1 failed
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':test'.
+> There were failing tests. See the report at: file:///C:/probe/build/reports/tests/test/index.html
+
+* Try:
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 1s
+"""
+
+_COMPILE_ERROR = r"""C:\probe\src\main\java\probe\Widget.java:5: error: cannot find symbol
+        foo();
+        ^
+  symbol:   method foo()
+  location: class Widget
+1 error
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileJava'.
+> Compilation failed; see the compiler output below.
+  C:\probe\src\main\java\probe\Widget.java:5: error: cannot find symbol
+          foo();
+          ^
+    symbol:   method foo()
+    location: class Widget
+  1 error
+
+* Try:
+> Check your code and dependencies to fix the compilation error(s)
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 558ms
+"""
+
+
+def test_an_option_the_task_does_not_take_reports_gradles_reason(tmp_path):
+    """--tests after compileJava fails in configuration, before any task runs.
+
+    The exact lines are the point as much as first_failure: the block is kept
+    and '* Try:' and 'BUILD FAILED' stay out.
+    """
+    root = _fake_gradle(tmp_path, output=_TESTS_ON_A_COMPILE_TASK, exit_code=1)
+    result = gradle_verify(str(root), tasks=["compileJava"], tests=["*PossibleTest*"])
+
+    assert result["ok"] is False
+    assert result["first_failure"] == ("Problem configuring task :compileJava from command line. "
+                                       "> Unknown command-line option '--tests'.")
+    assert result["lines_kind"] == "signal"
+    assert result["lines"] == ["FAILURE: Build failed with an exception.",
+                               "* What went wrong:",
+                               "Problem configuring task :compileJava from command line.",
+                               "> Unknown command-line option '--tests'."]
+
+
+def test_an_unknown_task_reports_gradles_reason(tmp_path):
+    root = _fake_gradle(tmp_path, output=_UNKNOWN_TASK, exit_code=1)
+    result = gradle_verify(str(root), tasks=["noSuchTask"])
+
+    assert result["first_failure"] == "Task 'noSuchTask' not found in root project 'utils'."
+    assert result["lines"] == ["FAILURE: Build failed with an exception.",
+                               "* What went wrong:",
+                               "Task 'noSuchTask' not found in root project 'utils'."]
+
+
+def test_a_test_filter_matching_nothing_reports_gradles_reason(tmp_path):
+    """An execution failure of the test task names its cause nowhere else either."""
+    root = _fake_gradle(tmp_path, output=_NO_TESTS_FOUND, exit_code=1)
+    result = gradle_verify(str(root), tasks=["test"], tests=["*NoSuchTestAnywhere*"])
+
+    assert result["first_failure"] == (
+        "Execution failed for task ':test'. "
+        "> No tests found for given includes: [*NoSuchTestAnywhere*](--tests filter)")
+
+
+def test_failing_tests_under_quiet_report_the_task_that_failed(tmp_path):
+    """-q prints no per-test FAILED line, so the reason is the first thing naming the failure.
+
+    The count line was never a diagnostic and still is not one.
+    """
+    root = _fake_gradle(tmp_path, output=_FAILING_TESTS, exit_code=1)
+    result = gradle_verify(str(root), tasks=["test"])
+
+    assert result["first_failure"] == (
+        "Execution failed for task ':test'. > There were failing tests. "
+        "See the report at: file:///C:/probe/build/reports/tests/test/index.html")
+    assert "2 tests completed, 1 failed" not in result["lines"]
+
+
+@pytest.mark.parametrize("output, first", [
+    (_COMPILE_ERROR, r"C:\probe\src\main\java\probe\Widget.java:5: error: cannot find symbol"),
+    # What a build logging test events past -q prints ahead of the same tail.
+    ("WidgetTest > breaks() FAILED\n"
+     "    org.opentest4j.AssertionFailedError at WidgetTest.java:10\n" + _FAILING_TESTS,
+     "WidgetTest > breaks() FAILED"),
+], ids=["compile-error", "failing-test"])
+def test_a_diagnostic_printed_before_the_verdict_stays_the_first_failure(tmp_path, output,
+                                                                        first):
+    root = _fake_gradle(tmp_path, output=output, exit_code=1)
+    result = gradle_verify(str(root))
+
+    assert result["first_failure"] == first
+    assert result["lines"][0] == first
+    assert "* What went wrong:" in result["lines"]
+
+
+def test_a_compile_error_keeps_the_compiler_output_gradle_repeats_in_its_reason(tmp_path):
+    """Gradle 9 repeats the compiler output under the heading, and the block is kept whole."""
+    root = _fake_gradle(tmp_path, output=_COMPILE_ERROR, exit_code=1)
+    result = gradle_verify(str(root))
+
+    assert result["lines"] == [
+        r"C:\probe\src\main\java\probe\Widget.java:5: error: cannot find symbol",
+        "FAILURE: Build failed with an exception.",
+        "* What went wrong:",
+        "Execution failed for task ':compileJava'.",
+        "> Compilation failed; see the compiler output below.",
+        r"  C:\probe\src\main\java\probe\Widget.java:5: error: cannot find symbol",
+        "          foo();",
+        "          ^",
+        "    symbol:   method foo()",
+        "    location: class Widget",
+        "  1 error",
+    ]
+
+
+def test_the_reason_ends_at_the_next_section_without_a_blank_line(tmp_path):
+    root = _fake_gradle(
+        tmp_path,
+        output=("FAILURE: Build failed with an exception.\n"
+                "* What went wrong:\n"
+                "Execution failed for task ':a'.\n"
+                "> boom\n"
+                "* Try:\n"
+                "> Run with --stacktrace option to get the stack trace.\n"),
+        exit_code=1,
+    )
+    result = gradle_verify(str(root))
+
+    assert result["first_failure"] == "Execution failed for task ':a'. > boom"
+    assert result["lines"][-1] == "> boom"
+
+
+def test_the_verdict_is_the_first_failure_only_when_no_reason_follows(tmp_path):
+    root = _fake_gradle(tmp_path, output="FAILURE: Build failed with an exception.\n",
+                        exit_code=1)
+    result = gradle_verify(str(root))
+
+    assert result["first_failure"] == "FAILURE: Build failed with an exception."
+
+
+def test_the_cli_prints_gradles_reason(tmp_path, capsys):
+    root = _fake_gradle(tmp_path, output=_TESTS_ON_A_COMPILE_TASK, exit_code=1)
+
+    code = cli.main(["gradle", "verify", str(root), "compileJava", "--tests", "*PossibleTest*"])
+
+    out = capsys.readouterr().out.splitlines()
+    assert code == 1
+    assert "> Unknown command-line option '--tests'." in out
+    assert out[-1] == "GATE: FAIL rc=1"
+
+
+# --------------------------------------------------------------------------
 # Timeout backstop. With a pipe sink this path can itself hang on Windows
 # (subprocess.run drains with communicate() and no timeout after the kill), so
 # it is worth proving it returns a verdict.
@@ -450,6 +677,109 @@ def test_task_options_are_never_task_scoped_for_a_subproject(tmp_path, monkeypat
 
 
 # --------------------------------------------------------------------------
+# Scoping. A module without a wrapper of its own is a project of the build
+# above it, named by the project path its directory spells under that build's
+# root - never by the alias or name the caller typed, which gradle accepts
+# only as an abbreviation that happens to match.
+# --------------------------------------------------------------------------
+
+def _wrapperless(tmp_path: Path, monkeypatch, build: str, path: str, shorthand: str) -> Path:
+    """Seeds one module at tmp_path/path under a stand-in wrapper at tmp_path/build.
+
+    Returns:
+        the directory holding the wrapper, where the argv file lands
+    """
+    root = tmp_path / build if build else tmp_path
+    root.mkdir(exist_ok=True)
+    _fake_gradle(root)
+    (tmp_path / path).mkdir(parents=True)
+    name = Path(path).name
+    _seed(monkeypatch, tmp_path,
+          {"shorthand": shorthand, "name": name, "path": path, "kind": "gradle",
+           "repo": False, "package": None, "buildable": True})
+    return root
+
+
+@pytest.mark.parametrize("task, sent", [
+    ("test", ":tooling:test"),
+    (":test", ":tooling:test"),
+    (":sub:test", ":tooling:sub:test"),
+])
+def test_a_task_is_relative_to_the_module_named(tmp_path, monkeypatch, task, sent):
+    """':test' is the module's own test, as it is for a module that is its own root."""
+    root = _wrapperless(tmp_path, monkeypatch, "", "tooling", "too")
+
+    result = gradle_verify("tooling", tasks=[task])
+
+    assert result["tasks"] == [sent]
+    assert _argv(root)[0] == sent
+
+
+def test_a_subproject_is_scoped_by_its_directory_not_by_the_alias(tmp_path, monkeypatch):
+    """'lib' reached ':library' only as an abbreviation gradle chose to accept."""
+    root = _wrapperless(tmp_path, monkeypatch, "annotations", "annotations/library", "lib")
+
+    result = gradle_verify("lib", tasks=[":help"])
+
+    assert result["tasks"] == [":library:help"]
+    assert _argv(root)[0] == ":library:help"
+
+
+def test_a_nested_subproject_takes_every_segment_of_its_directory(tmp_path, monkeypatch):
+    root = _wrapperless(tmp_path, monkeypatch, "", "a/b", "b")
+
+    gradle_verify("b", tasks=["compileJava", ":test"])
+
+    assert _argv(root)[:2] == [":a:b:compileJava", ":a:b:test"]
+
+
+def test_a_subproject_named_by_path_is_scoped_by_its_directory(tmp_path):
+    """The path token is not a project name, and was spliced in as one."""
+    root = _fake_gradle(tmp_path)
+    (root / "widgets").mkdir()
+
+    result = gradle_verify(str(root / "widgets"), tasks=[":test"])
+
+    assert result["tasks"] == [":widgets:test"]
+
+
+def test_a_root_named_by_a_relative_path_takes_its_tasks_as_written(tmp_path, monkeypatch):
+    """'.' resolves to the root itself, which is no subproject of anything."""
+    root = _fake_gradle(tmp_path)
+    monkeypatch.chdir(root)
+
+    result = gradle_verify(".", tasks=["test"])
+
+    assert result["tasks"] == ["test"]
+
+
+def test_a_root_module_takes_a_project_path_as_written(tmp_path):
+    root = _fake_gradle(tmp_path)
+
+    result = gradle_verify(str(root), tasks=[":tooling:test", ":test", "test"])
+
+    assert result["tasks"] == [":tooling:test", ":test", "test"]
+
+
+def test_a_flag_in_tasks_is_not_scoped_for_a_subproject(tmp_path, monkeypatch):
+    root = _wrapperless(tmp_path, monkeypatch, "", "tooling", "too")
+
+    gradle_verify("too", tasks=["test", "--info"])
+
+    assert _argv(root)[:2] == [":tooling:test", "--info"]
+
+
+def test_the_cli_runs_a_subprojects_own_test_for_a_leading_colon(tmp_path, monkeypatch, capsys):
+    root = _wrapperless(tmp_path, monkeypatch, "", "tooling", "too")
+
+    code = cli.main(["gradle", "verify", "tooling", ":test", "--tests", "*A"])
+
+    assert code == 0
+    assert _argv(root)[:3] == [":tooling:test", "--tests", "*A"]
+    assert "gradlew :tooling:test --tests '*A'" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # The refusals. Each one is decided before anything runs, so the wrapper
 # never writes its argv file.
 # --------------------------------------------------------------------------
@@ -532,6 +862,44 @@ def test_an_argument_is_refused_before_the_module_is_resolved(tmp_path):
 
     assert result["ok"] is False
     assert "bare=true" in result["error"]
+
+
+@pytest.mark.parametrize("task", [
+    "test&calc", "test|more", "test>out", "test<in", "test%PATH%", "test^x", "test!x",
+    'te"st', "test\nx",
+])
+def test_a_task_carrying_a_cmd_metacharacter_is_refused(tmp_path, task):
+    """gradlew.bat hands the command line to cmd.exe, so 'test&calc' would run calc."""
+    root = _fake_gradle(tmp_path)
+
+    error = _refused(root, gradle_verify(str(root), tasks=["compileJava", task]))
+    assert f"task '{task}'" in error
+    assert "cmd.exe" in error
+
+
+def test_a_task_is_refused_before_the_module_is_resolved(tmp_path):
+    result = gradle_verify(str(tmp_path / "does-not-exist"), tasks=["test&calc"])
+
+    assert result["ok"] is False
+    assert "task 'test&calc'" in result["error"]
+
+
+def test_a_task_path_of_gradle_characters_is_passed(tmp_path):
+    root = _fake_gradle(tmp_path)
+
+    gradle_verify(str(root), tasks=[":a-b_c.d:compileTestJava", "-Pkey=value"])
+
+    assert _argv(root)[:2] == [":a-b_c.d:compileTestJava", "-Pkey=value"]
+
+
+def test_a_cli_task_refusal_is_a_precondition_exit(tmp_path, capsys):
+    root = _fake_gradle(tmp_path)
+
+    code = cli.main(["gradle", "verify", str(root), "test&calc"])
+
+    assert code == 2
+    assert "task 'test&calc'" in capsys.readouterr().err
+    assert not (root / ARGV_FILE).exists()
 
 
 # --------------------------------------------------------------------------
