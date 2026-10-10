@@ -651,6 +651,45 @@ def test_delete_remote_removes_it(ws, gh):
     assert not any(ws.branch in line for line in ws.remotes())
 
 
+def test_a_dry_run_plans_the_remote_delete_of_a_branch_it_has_yet_to_push(ws, gh):
+    """Origin lacks the branch only until the planned push lands it."""
+    before = ws.snapshot()
+
+    result = branch_finish(repo=ws.work, gh=gh, dry_run=True, delete_remote=True)
+
+    assert _states(result)["push"] == "planned"
+    assert _states(result)["delete-remote"] == "planned"
+    assert ws.snapshot() == before
+    assert not any(ws.branch in line for line in ws.remotes())
+
+
+def test_a_dry_run_plans_the_remote_delete_of_a_pushed_branch(ws, gh):
+    _git(ws.work, "push", "-u", "origin", ws.branch)
+
+    result = branch_finish(repo=ws.work, gh=gh, dry_run=True, delete_remote=True)
+
+    assert _states(result)["push"] == "skipped"
+    assert _states(result)["delete-remote"] == "planned"
+
+
+def test_a_real_run_reads_origin_live_before_the_remote_delete(ws, gh, monkeypatch):
+    """GitHub's automatic head-branch delete removes the branch at the merge, after the push."""
+    land = gh._land
+
+    def land_and_delete_the_head(pr: dict) -> None:
+        land(pr)
+        _git(ws.origin, "branch", "-D", pr["head"])
+
+    monkeypatch.setattr(gh, "_land", land_and_delete_the_head)
+
+    result = branch_finish(repo=ws.work, gh=gh, assume_yes=True, delete_remote=True)
+
+    assert result["status"] == "finished"
+    step = next(s for s in result["steps"] if s["name"] == "delete-remote")
+    assert step["state"] == "skipped"
+    assert "already gone" in step["detail"]
+
+
 # --------------------------------------------------------------------------
 # The CLI adapter.
 # --------------------------------------------------------------------------

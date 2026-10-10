@@ -564,7 +564,8 @@ def branch_finish(repo: str | Path | None = None, *, title: str | None = None,
 
     # ---- push ----
     push_command = f"git push -u origin {branch}"
-    if _remote_head(repo_dir, branch) == branch_sha:
+    already_pushed = _remote_head(repo_dir, branch) == branch_sha
+    if already_pushed:
         record("push", "skipped", push_command,
                f"origin/{branch} is already at {_short(branch_sha)}")
     else:
@@ -705,7 +706,10 @@ def branch_finish(repo: str | Path | None = None, *, title: str | None = None,
     if not delete_remote:
         record("delete-remote", "skipped", remote_command,
                "--delete-remote not given - the remote branch is its own decision")
-    elif _remote_head(repo_dir, branch) == "":
+    # Origin is read live, except on a dry run whose push is only planned: there
+    # origin does not carry the branch yet, but will once that push runs, so a
+    # read would report as gone the branch the real run deletes.
+    elif (already_pushed or not dry_run) and _remote_head(repo_dir, branch) == "":
         record("delete-remote", "skipped", remote_command, f"origin/{branch} is already gone")
     else:
         outcome = git_step("delete-remote", ["push", "origin", "--delete", branch],
