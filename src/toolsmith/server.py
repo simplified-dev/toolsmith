@@ -29,28 +29,73 @@ def gradle_verify(
     tasks: list[str] | None = None,
     tail: int = 25,
     compile_only: bool = False,
+    tests: list[str] | None = None,
     rerun: bool = False,
+    rerun_tasks: bool = False,
+    system_properties: list[str] | None = None,
 ) -> dict:
     """Run the module-scoped gradle gate and return a structured pass/fail result.
 
-    Replaces the hand-written shape
-    ``cd MODULE && ./gradlew compileJava test -q 2>&1 | grep -vE noise | tail -N``.
+    Needs a gradle module. Replaces the hand-written shape
+    ``cd MODULE && ./gradlew compileJava test -q 2>&1 | grep -vE noise | tail -N``,
+    and a filtered or forced run such as
+    ``./gradlew :test --tests "*FooTest" -Dkey=value --rerun``.
+
+    The binding rule: gradle binds a task option to the task written
+    immediately before it, so `tests` and `rerun` are placed straight after
+    the LAST task of the run and apply to that task alone - name the task they
+    are for last, e.g. tasks=[":test"]. With no task named they bind to `test`,
+    the last of the default set. Refused: either of them under compile_only
+    with no task named (that default set has no test task), and a flag inside
+    `tasks` beside them. The tool cannot see a task's type, so `tests` bound to
+    a task that is not a Test task fails the build in gradle ("Unknown
+    command-line option '--tests'"), which comes back as first_failure.
+    `system_properties` have no position and apply to the whole build.
+
+    Tasks are relative to the module. A module that is its own gradle root
+    takes them as written; for one without a wrapper of its own (a
+    subproject) each is scoped by its project path, read off its directory
+    under the gradle root, with a leading ':' dropped first - so for
+    <root>/tooling, "test" and ":test" both run ":tooling:test". A task of the
+    root project is run by naming the root as the module.
 
     Args:
         module: module alias (e.g. "ar"), name ("asset-renderer"), or path.
-        tasks: gradle tasks to run. Defaults to compileJava+test.
+        tasks: gradle tasks to run, in order, relative to the module. Defaults
+            to compileJava+test. A task holding a character cmd.exe acts on
+            (" % ^ & | < > ! or a control character) is refused.
         tail: how many signal / de-noised trailing lines to return.
         compile_only: use compileJava+compileTestJava as the default task set.
-        rerun: force re-execution past up-to-date checks and the build cache
-            (--rerun-tasks) so tests actually run instead of restoring
-            FROM-CACHE. Note: clean does not do this.
+        tests: test filter patterns for the last task, each passed as
+            --tests PATTERN - a class, Class.method, or a wildcard such as
+            "*FooTest".
+        rerun: pass gradle's --rerun to the last task, so it executes past
+            its up-to-date check and the build cache while the tasks before it
+            may still be skipped. This is what makes tests actually run
+            instead of restoring FROM-CACHE; clean does not do this.
+        rerun_tasks: pass --rerun-tasks, forcing EVERY task in the graph,
+            compilation included, to execute.
+        system_properties: JVM system properties, each "KEY=VALUE", passed as
+            -DKEY=VALUE. A bare KEY is refused: gradle reads it as the empty
+            string, which Boolean.getBoolean reads as false. They reach the
+            build's JVM; a forked test JVM sees one only where the build script
+            forwards it, and a property is no task input unless declared, so
+            pair it with rerun when a test must see a new value.
 
     Returns:
-        module, tasks, root, exit_code, ok, first_failure, lines, lines_kind.
-        On timeout, ok is False, exit_code is None, and timed_out is True.
+        module, tasks, argv (every argument gradle was given), root,
+        exit_code, ok, first_failure, lines, lines_kind. On timeout, ok is
+        False, exit_code is None, and timed_out is True. A refused argument
+        returns ok False and an error, and runs nothing.
+
+        first_failure is the first compile error or failing test where the
+        build printed one, and otherwise the reason gradle gave under
+        "* What went wrong:" - such as "Task 'x' not found in root project
+        'y'." - with gradle's bare "FAILURE:" verdict only when it gave none.
 
         Check lines_kind before reading anything into `lines`:
-          "signal" - lines matched as failure diagnostics. Meaningful.
+          "signal" - lines matched as failure diagnostics, and gradle's
+                     "* What went wrong:" block whole. Meaningful.
           "tail"   - no diagnostics matched, so this is just the last few
                      non-noise lines the build happened to print. It is NOT a
                      summary or a verdict, and on a passing run it is usually
@@ -63,7 +108,9 @@ def gradle_verify(
         gradle_tally or the JUnit XML for real numbers.
     """
     return _gradle.gradle_verify(module, tasks=tasks, tail=tail,
-                                 compile_only=compile_only, rerun=rerun)
+                                 compile_only=compile_only, tests=tests, rerun=rerun,
+                                 rerun_tasks=rerun_tasks,
+                                 system_properties=system_properties)
 
 
 @mcp.tool()
