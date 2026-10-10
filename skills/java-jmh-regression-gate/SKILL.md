@@ -31,8 +31,12 @@ yet. Skip when only one JMH file exists.
 - Parses two JMH text or JSON outputs.
 - Matches benchmarks 1-to-1 by `(Benchmark name, Mode, Params)` tuple.
 - Computes per-benchmark percentage delta: `(candidate - baseline) / baseline * 100`.
-- Categorizes: `regression` (delta < -threshold), `wash` (within +/-threshold),
-  `improvement` (delta > +threshold).
+- Categorizes in each benchmark's own direction, read from its unit (`ops/time`
+  higher is better, `time/op` lower is better) and from its mode where the unit
+  names neither - never one direction for the whole run, which a mix of `thrpt`
+  and `avgt` rows would score backwards: `regression` (worse by more than the
+  threshold), `wash` (within +/-threshold), `improvement` (better by more than
+  the threshold).
 - Halts (exits non-zero) when any regression exceeds the threshold.
 - Surfaces the worst N regressions cleanly; does not dump every row.
 

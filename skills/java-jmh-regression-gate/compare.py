@@ -186,15 +186,13 @@ def render_text(
     only_baseline: set[Key],
     only_candidate: set[Key],
 ) -> str:
-    higher_is_better = _infer_direction(paired)
-    regressions = [c for c in paired if _is_regression(c, threshold, higher_is_better)]
-    improvements = [c for c in paired if _is_improvement(c, threshold, higher_is_better)]
+    regressions = [c for c in paired if _is_regression(c, threshold)]
+    improvements = [c for c in paired if _is_improvement(c, threshold)]
     washes = len(paired) - len(regressions) - len(improvements)
 
     lines = []
     lines.append(f"Compared {len(paired)} benchmarks (threshold +/-{threshold:.2f}%).")
-    direction = "higher is better" if higher_is_better else "lower is better"
-    lines.append(f"Direction: {direction} (inferred from units).")
+    lines.append("Direction: per benchmark, from its unit (time/op lower is better, ops/time higher).")
     lines.append(
         f"Regressions: {len(regressions)} | Improvements: {len(improvements)} | "
         f"Within threshold: {washes}"
@@ -206,7 +204,7 @@ def render_text(
     if regressions:
         lines.append("")
         lines.append(f"Top {min(top, len(regressions))} regressions (worst first):")
-        worst = sorted(regressions, key=lambda c: _regression_magnitude(c, higher_is_better), reverse=True)
+        worst = sorted(regressions, key=_regression_magnitude, reverse=True)
         for c in worst[:top]:
             delta = c.delta_pct
             lines.append(
@@ -217,9 +215,9 @@ def render_text(
     return "\n".join(lines)
 
 
-def render_markdown(paired: list[Comparison], threshold: float, top: int, higher_is_better: bool) -> str:
-    regressions = [c for c in paired if _is_regression(c, threshold, higher_is_better)]
-    rows = sorted(regressions, key=lambda c: _regression_magnitude(c, higher_is_better), reverse=True)[:top]
+def render_markdown(paired: list[Comparison], threshold: float, top: int) -> str:
+    regressions = [c for c in paired if _is_regression(c, threshold)]
+    rows = sorted(regressions, key=_regression_magnitude, reverse=True)[:top]
     out = ["| Benchmark | Params | Baseline | Candidate | Delta % |", "|---|---|---|---|---|"]
     for c in rows:
         params = ", ".join(f"{k}={v}" for k, v in c.key.params) or "-"
@@ -249,31 +247,39 @@ def render_json(paired: list[Comparison]) -> str:
     )
 
 
-def _infer_direction(paired: list[Comparison]) -> bool:
-    """True if higher scores are better (throughput units)."""
-    for c in paired:
-        unit = c.baseline.unit.lower()
-        if unit.startswith("ops/"):
-            return True
-        if "/op" in unit:
-            return False
-    return True
+LOWER_IS_BETTER_MODES = frozenset({"avgt", "sample", "ss"})
 
 
-def _is_regression(c: Comparison, threshold: float, higher_is_better: bool) -> bool:
-    if higher_is_better:
+def _higher_is_better(c: Comparison) -> bool:
+    """True if a higher score is better for this benchmark.
+
+    Decided per benchmark, never per run: one JMH run mixes throughput rows (ops/time, higher is
+    better) with average-time, sample and single-shot rows (time/op, lower is better), so a
+    direction read off one row and applied to all scores the others backwards. The unit decides;
+    the mode decides where the unit names neither.
+    """
+    unit = c.baseline.unit.lower()
+    if unit.startswith("ops/"):
+        return True
+    if "/op" in unit:
+        return False
+    return c.key.mode not in LOWER_IS_BETTER_MODES
+
+
+def _is_regression(c: Comparison, threshold: float) -> bool:
+    if _higher_is_better(c):
         return c.delta_pct < -threshold
     return c.delta_pct > threshold
 
 
-def _is_improvement(c: Comparison, threshold: float, higher_is_better: bool) -> bool:
-    if higher_is_better:
+def _is_improvement(c: Comparison, threshold: float) -> bool:
+    if _higher_is_better(c):
         return c.delta_pct > threshold
     return c.delta_pct < -threshold
 
 
-def _regression_magnitude(c: Comparison, higher_is_better: bool) -> float:
-    return -c.delta_pct if higher_is_better else c.delta_pct
+def _regression_magnitude(c: Comparison) -> float:
+    return -c.delta_pct if _higher_is_better(c) else c.delta_pct
 
 
 def main(argv: list[str]) -> int:
@@ -312,14 +318,13 @@ def main(argv: list[str]) -> int:
         return 2
 
     if args.format == "md":
-        print(render_markdown(paired, args.threshold, args.top, _infer_direction(paired)))
+        print(render_markdown(paired, args.threshold, args.top))
     elif args.format == "json":
         print(render_json(paired))
     else:
         print(render_text(paired, args.threshold, args.top, only_baseline, only_candidate))
 
-    higher_is_better = _infer_direction(paired)
-    has_regression = any(_is_regression(c, args.threshold, higher_is_better) for c in paired)
+    has_regression = any(_is_regression(c, args.threshold) for c in paired)
     pair_mismatch = args.require_pairs and (only_baseline or only_candidate)
     if has_regression or pair_mismatch:
         return 1
